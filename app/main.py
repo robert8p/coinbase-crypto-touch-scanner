@@ -134,6 +134,8 @@ async def api_status(settings: Settings = Depends(get_settings)):
             "alpaca": APP_STATE.alpaca.__dict__,
             "alpaca_bad_symbols_count": len(APP_STATE.alpaca_bad_symbols),
             "alpaca_bad_symbols_sample": list(APP_STATE.alpaca_bad_symbols.keys())[:10],
+            "alpaca_supported_symbols_count": APP_STATE.alpaca_supported_symbols_count,
+            "alpaca_missing_symbols_count": APP_STATE.alpaca_missing_symbols_count,
             "universe_count": uni_count,
             "scored_count": scored_count,
             "universe_last_refresh_utc": APP_STATE.universe_last_refresh_utc,

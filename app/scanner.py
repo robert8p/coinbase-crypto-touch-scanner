@@ -138,6 +138,11 @@ async def scan_once(settings: Settings) -> None:
 
     now = _utcnow()
 
+    # Mark scan started (helps diagnostics even if scan takes time)
+    with APP_STATE.lock:
+        APP_STATE.last_scan_utc = now.isoformat()
+        APP_STATE.last_scan_error = None
+
     # Use a small rolling cache for 5m bars to reduce API load and 429 risk
     with APP_STATE.lock:
         cache_last = APP_STATE.bars5_cache_last_utc
@@ -159,18 +164,36 @@ async def scan_once(settings: Settings) -> None:
         start_5m = now - timedelta(minutes=25)
     end_5m = now
 
+
     try:
         APP_STATE.set_alpaca_request()
 
-        bars5_new = await alpaca.fetch_bars_batched(
+        # Step 1: use latest quotes to discover which symbols Alpaca actually supports.
+        quotes = await alpaca.fetch_latest_quotes_batched(
             symbols,
+            max_symbols_per_request=max(50, settings.alpaca_max_symbols_per_request // 2),
+        )
+
+        symbols_supported = sorted(set(quotes.keys()) | {"BTC/USD", "ETH/USD"})
+        missing = [s for s in symbols if s not in symbols_supported and s not in {"BTC/USD", "ETH/USD"}]
+
+        with APP_STATE.lock:
+            APP_STATE.alpaca_supported_symbols_count = len(symbols_supported)
+            APP_STATE.alpaca_missing_symbols_count = len(missing)
+
+        if len(symbols_supported) <= 2:
+            raise RuntimeError("Alpaca returned quotes for 0 symbols (check Alpaca key/plan/crypto location).")
+
+        # Step 2: fetch 5m bars only for supported symbols (reduces 400s / invalid symbol issues).
+        bars5_new = await alpaca.fetch_bars_batched(
+            symbols_supported,
             timeframe="5Min",
             start=start_5m,
             end=end_5m,
             max_symbols_per_request=settings.alpaca_max_symbols_per_request,
         )
 
-        # Record any Alpaca symbol rejections / partial batch failures
+        # Record any Alpaca symbol rejections / partial batch failures (if we did hit 400s internally)
         if getattr(alpaca, "bad_symbols_last", None):
             with APP_STATE.lock:
                 for s in alpaca.bad_symbols_last:
@@ -185,39 +208,8 @@ async def scan_once(settings: Settings) -> None:
             with APP_STATE.lock:
                 APP_STATE.alpaca.last_error = warn
 
-        # Only request 1m bars/quotes for symbols that actually returned 5m bars
+        # Only request 1m bars for symbols that actually returned 5m bars
         symbols_data = sorted(set(bars5_new.keys()) | {"BTC/USD", "ETH/USD"})
-
-        # Merge 5m cache
-        if full_fetch:
-            merged = {}
-            for sym in symbols_data:
-                rows = sorted(bars5_new.get(sym, []), key=lambda b: b.get("t", ""))
-                merged[sym] = rows
-        else:
-            merged = cache
-            for sym, rows_new in bars5_new.items():
-                existing = merged.get(sym, [])
-                comb = existing + rows_new
-                # dedupe by timestamp
-                seen_t = set()
-                out_rows = []
-                for b in sorted(comb, key=lambda b: b.get("t", "")):
-                    tt = b.get("t")
-                    if not tt or tt in seen_t:
-                        continue
-                    seen_t.add(tt)
-                    out_rows.append(b)
-                # keep last lookback window
-                if len(out_rows) > int((settings.feature_lookback_hours * 60) // 5) + 5:
-                    out_rows = out_rows[-(int((settings.feature_lookback_hours * 60) // 5) + 5):]
-                merged[sym] = out_rows
-
-        with APP_STATE.lock:
-            APP_STATE.bars5_cache = merged
-            APP_STATE.bars5_cache_last_utc = now.isoformat()
-
-        bars5 = merged
 
         # Fetch last 3 minutes of 1m bars for fallback close
         bars1 = await alpaca.fetch_bars_batched(
@@ -225,11 +217,6 @@ async def scan_once(settings: Settings) -> None:
             timeframe="1Min",
             start=now - timedelta(minutes=3),
             end=now,
-            max_symbols_per_request=max(50, settings.alpaca_max_symbols_per_request // 2),
-        )
-
-        quotes = await alpaca.fetch_latest_quotes_batched(
-            symbols_data,
             max_symbols_per_request=max(50, settings.alpaca_max_symbols_per_request // 2),
         )
 

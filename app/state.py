@@ -42,6 +42,10 @@ class AppState:
     # Alpaca symbol rejections (invalid / unsupported)
     alpaca_bad_symbols: Dict[str, str] = field(default_factory=dict)
 
+    # Alpaca scan selection diagnostics
+    alpaca_supported_symbols_count: int = 0
+    alpaca_missing_symbols_count: int = 0
+
     # Cached bars (to reduce API load)
     bars5_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     bars5_cache_last_utc: Optional[str] = None
