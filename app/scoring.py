@@ -1,175 +1,263 @@
 from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 import pandas as pd
-import asyncio
 
-from .config import Settings
 from .coinbase import CoinbaseClient
-from .features import candles_to_df, compute_features, FEATURES
-from .modeling import ModelArtifacts, load_artifacts, default_artifacts
+from .alpaca_crypto import AlpacaCryptoClient
+from .config import Settings
+from .features import compute_features
+from .modeling import load_artifacts, ModelArtifacts
 
-def parse_pcts(s: str) -> List[float]:
+logger = logging.getLogger(__name__)
+
+def parse_pcts(pcts: str) -> list[int]:
     out=[]
-    for part in (s or "").split(","):
+    for part in str(pcts or "").split(","):
         part=part.strip()
-        if not part: 
+        if not part:
             continue
         try:
-            out.append(float(part))
+            out.append(int(float(part)))
         except Exception:
             continue
     return sorted(set(out))
 
-def pct_dir(p: float) -> str:
-    if abs(p-round(p)) < 1e-9:
-        return f"pt{int(round(p))}"
-    return "pt"+str(p).replace(".","_")
 
-def _logit(p: np.ndarray) -> np.ndarray:
-    p = np.clip(p, 1e-9, 1-1e-9)
-    return np.log(p/(1-p))
+@dataclass
+class ProductScore:
+    product_id: str
+    base_price: float
+    pct_move_to_target: float
+    probs: Dict[int, float]
+    rvol: float
+    atr_pct: float
+    ret_30m: float
+    vwap_loc: float
 
-def _sigmoid(x: np.ndarray) -> np.ndarray:
-    x = np.clip(x, -50, 50)
-    return 1.0/(1.0+np.exp(-x))
 
-def apply_probability_hygiene(df: pd.DataFrame, col: str, settings: Settings) -> None:
-    if col not in df.columns: 
-        return
-    p = df[col].astype(float).clip(0,1).to_numpy()
-    ttc = pd.to_numeric(df.get("time_to_horizon_frac", 1.0), errors="coerce").fillna(1.0).clip(0,1).to_numpy()
-    dist = pd.to_numeric(df.get("dist_to_target_atr", 1.0), errors="coerce").fillna(1.0).clip(0,50).to_numpy()
-    global_cap = float(getattr(settings, "prob_global_cap", 0.95))
-    k = float(getattr(settings, "dist_atr_k", 1.2))
-    cap_dist = np.exp(-k*dist)
-    cap_time = 0.05 + 0.95*ttc
-    cap = np.minimum(global_cap, np.maximum(cap_time, cap_dist))
+def _candles_to_df(candles: List[List[float]]) -> pd.DataFrame:
+    """Convert Coinbase candles response to a DataFrame.
 
-    rvol = pd.to_numeric(df.get("rvol", 1.0), errors="coerce").fillna(1.0).clip(0,50).to_numpy()
-    rsoft=float(getattr(settings,"rvol_soft",1.0)); rhard=float(getattr(settings,"rvol_hard",0.5))
-    rscale=np.where(rvol>=rsoft,1.0,np.where(rvol<=rhard,0.35,0.35+0.65*(rvol-rhard)/(rsoft-rhard+1e-9)))
-    cap*=rscale
+    Coinbase candles are returned as [time, low, high, open, close, volume]
+    with `time` as Unix seconds.
+    """
+    if not candles:
+        return pd.DataFrame()
+    df = pd.DataFrame(candles, columns=["time", "low", "high", "open", "close", "volume"])
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df = df.sort_values("time")
+    df = df.set_index("time")
+    return df
 
-    # hard rule: >0.9 only if very close in ATR
-    dist_hi=float(getattr(settings,"dist_atr_high_prob_max",0.25))
-    cap=np.where(dist<=dist_hi, cap, np.minimum(cap, 0.85))
 
-    df[col]=np.minimum(p, cap)
+async def _fetch_5m_history(
+    cb: CoinbaseClient,
+    product_id: str,
+    start: datetime,
+    end: datetime,
+    granularity: int,
+) -> Optional[pd.DataFrame]:
+    try:
+        candles = await cb.get_candles(product_id, start=start, end=end, granularity=granularity)
+    except Exception:
+        # Most common cause is Coinbase rate limiting (HTTP 429) or transient
+        # network errors. We treat it as a missing series for this cycle.
+        return None
+    if not candles:
+        return None
+    df = _candles_to_df(candles)
+    if df.empty:
+        return None
+    # Ensure we have enough bars for indicators
+    if len(df) < 40:
+        return None
+    return df
 
-def enforce_probability_mass(df: pd.DataFrame, prob_cols: List[str], primary_col: str, target_sum: float) -> float:
-    if df.empty or primary_col not in df.columns: 
-        return 1.0
-    p0 = df[primary_col].astype(float).clip(0,1).to_numpy()
-    s0=float(np.nansum(p0))
-    if s0 <= target_sum or target_sum <= 0:
-        return 1.0
-    l0=_logit(p0)
-    def sum_for_temp(temp: float) -> float:
-        return float(np.nansum(_sigmoid(l0/temp)))
-    lo,hi=1.0,20.0
-    for _ in range(20):
-        if sum_for_temp(hi) <= target_sum:
-            break
-        hi*=1.5
-        if hi>200: 
-            break
-    for _ in range(30):
-        mid=0.5*(lo+hi)
-        if sum_for_temp(mid) > target_sum: 
-            lo=mid
-        else:
-            hi=mid
-    temp=hi
-    for c in prob_cols:
-        if c in df.columns:
-            p=df[c].astype(float).clip(0,1).to_numpy()
-            df[c]=_sigmoid(_logit(p)/temp)
-    return temp
 
-async def load_models(settings: Settings) -> Dict[float, ModelArtifacts]:
-    base=Path(settings.model_dir)
-    models={}
-    for pct in parse_pcts(settings.target_move_pcts):
-        d=base/pct_dir(pct)
-        art=load_artifacts(d) or (load_artifacts(base) if abs(pct-float(settings.target_move_pct))<1e-9 else None)
+async def load_models(settings: Settings) -> Dict[int, Optional[dict]]:
+    """Load model artifacts for each threshold.
+
+    We store models in subdirs like {model_dir}/pt2, {model_dir}/pt5, etc.
+    """
+    base = Path(settings.model_dir)
+    models: Dict[int, Optional[dict]] = {}
+    for pct in sorted(set([int(round(x)) for x in settings.thresholds()])):
+        d = base / f"pt{pct}"
+        art = load_artifacts(d)
+        # Backward compatibility: allow artifacts directly in model_dir
         if art is None:
-            art=default_artifacts(FEATURES)
-        models[pct]=art
+            art = load_artifacts(base)
+        models[pct] = art
     return models
 
-async def compute_scores(settings: Settings, cb: CoinbaseClient, products: List[str]) -> Tuple[pd.DataFrame, Dict[str,Any]]:
+
+def _fallback_prob(features: Dict[str, float], pct: int) -> float:
+    """Heuristic probability fallback when no trained model exists.
+
+    This is intentionally conservative; it should not emit tons of 90%+ signals.
+    """
+    # Combine a few normalized signals conservatively
+    rvol = float(np.clip(features.get("rvol", 1.0), 0.0, 5.0))
+    ema_9_21 = float(np.clip(features.get("ema_9_21", 0.0), -0.2, 0.2))
+    ema_21_55 = float(np.clip(features.get("ema_21_55", 0.0), -0.2, 0.2))
+    ema21_slope = float(np.clip(features.get("ema21_slope", 0.0), -0.2, 0.2))
+    ema_strength = 10.0*(ema_9_21 + 0.7*ema_21_55) + 5.0*ema21_slope
+    adx = float(np.clip(features.get("adx14", 10.0), 0.0, 60.0))
+    vwap_loc = float(np.clip(features.get("vwap_loc", 0.0), -0.05, 0.05))
+    dist_to_target_atr = float(np.clip(features.get("dist_to_target_atr", 5.0), 0.0, 10.0))
+
+    # Simple score in [-, +]
+    score = (
+        0.35 * np.tanh((rvol - 1.2) / 1.0)
+        + 0.25 * np.tanh(ema_strength)
+        + 0.20 * np.tanh((adx - 18) / 10)
+        + 0.20 * np.tanh(-vwap_loc / 0.02)
+        + 0.25 * np.tanh(-(dist_to_target_atr - 2.0) / 2.0)
+    )
+
+    # Larger targets are harder
+    pct_i = int(round(float(pct)))
+    hardness = {2: 0.0, 5: 0.6, 10: 1.1}.get(pct_i, 0.0)
+    score = score - hardness
+    # Map to probability (conservative)
+    p = 1 / (1 + np.exp(-2.2 * score))
+    return float(np.clip(p, 0.01, 0.85))
+
+
+
+
+async def compute_scores(settings: Settings, cb: CoinbaseClient, alpaca: AlpacaCryptoClient, product_ids: List[str]) -> Tuple[pd.DataFrame, dict]:
+    """Compute probabilities for each Coinbase-tradeable product using Alpaca batched crypto bars.
+
+    Uses 5-minute bars for features; horizon is fixed in hours (HORIZON_HOURS).
+    This implementation is designed for reliability at scale: it avoids per-symbol candle calls
+    and instead batches via Alpaca's multi-symbol bars endpoint.
+    """
     now = datetime.now(timezone.utc)
     horizon_end = now + timedelta(hours=int(settings.horizon_hours))
-    # get BTC candles as regime
-    btc5=None
+    # Pull enough history for indicators + stability (12h is plenty for 5m indicators and RVOL)
+    lookback_start = now - timedelta(hours=12)
+
+    # thresholds
+    thresholds = [int(round(x)) for x in settings.thresholds()]
+    thresholds = sorted(set([t for t in thresholds if t > 0]))
+
+    meta: dict = {
+        "now_utc": now.isoformat().replace("+00:00","Z"),
+        "horizon_end_utc": horizon_end.isoformat().replace("+00:00","Z"),
+        "thresholds": thresholds,
+        "skipped": {"no_bars": 0, "too_few_bars": 0, "illiquid": 0},
+    }
+
+    # Liquidity gates (not a cap): score everything that has sufficient notional volume and sane ATR
+    min_notional = float(getattr(settings, "min_notional_volume", 50000.0))
+    min_bars = int(getattr(settings, "min_bars_5m", 60))  # 5 hours=60 bars; need more for indicators
+    min_bars = max(min_bars, 80)
+
+    # Fetch BTC regime bars (for btc_ret_30m feature)
+    btc_pid = f"BTC-{settings.quote_currency.upper()}"
     try:
-        btc = await cb.get_candles("BTC-USD", now-timedelta(hours=8), now, 300)
-        btc5=candles_to_df(btc)
+        btc_map = await alpaca.get_bars_batch([btc_pid], start=lookback_start, end=now, timeframe="5Min")
+        btc_df = None
+        if btc_pid in btc_map:
+            btc_df = btc_map[btc_pid].copy()
+            btc_df["time"] = pd.to_datetime(btc_df["time"], utc=True)
+            btc_df = btc_df.set_index("time").sort_index()
     except Exception:
-        btc5=None
+        btc_df = None
 
-    models = await load_models(settings)
-    pcts = parse_pcts(settings.target_move_pcts)
-    primary = float(settings.target_move_pct)
-
-    # pull candles with limited concurrency
-    sem=asyncio.Semaphore(10)
-    async def fetch_one(pid: str):
-        async with sem:
-            end=now
-            start=now-timedelta(hours=8)
-            c5 = await cb.get_candles(pid, start, end, 300)
-            c1 = await cb.get_candles(pid, now-timedelta(hours=2), now, 60)
-            return pid, c5, c1
-
-    rows=[]
-    meta={}
-    tasks=[fetch_one(pid) for pid in products]
-    for fut in asyncio.as_completed(tasks):
+    # Batch fetch bars for products in chunks to avoid long URLs
+    all_bars: Dict[str, pd.DataFrame] = {}
+    chunk_size = int(getattr(settings, "alpaca_batch_symbols", 200))
+    chunk_size = max(25, min(chunk_size, 400))
+    for i in range(0, len(product_ids), chunk_size):
+        chunk = product_ids[i:i+chunk_size]
         try:
-            pid,c5,c1 = await fut
-            df5=candles_to_df(c5)
-            df1=candles_to_df(c1)
-            if len(df5)<60 or len(df1)<60:
-                continue
-            base_feats = compute_features(df5, df1, btc5, now, horizon_end, primary)
-            feat_row = {k: float(base_feats.get(k,0.0)) for k in FEATURES}
-            feat_row["product_id"]=pid
-            feat_row["price"]=float(base_feats["price"])
-            feat_row["vwap"]=float(base_feats["vwap"])
-            # compute probs for each pct by recomputing dist_to_target_atr
-            for pct in pcts:
-                fr=feat_row.copy()
-                fr["dist_to_target_atr"]=float((pct/100.0)/(fr["atr_pct"]+1e-9))
-                X=np.asarray([fr[f] for f in FEATURES], dtype=float)
-                p=float(models[pct].predict_proba(X)[0])
-                feat_row[f"prob_{pct}"]=p
-            # map to fixed columns 2/5/10 for UI
-            rows.append(feat_row)
+            bars_map = await alpaca.get_bars_batch(chunk, start=lookback_start, end=now, timeframe="5Min")
+            all_bars.update(bars_map)
         except Exception as e:
+            # don't fail the whole cycle
+            meta.setdefault("batch_errors", 0)
+            meta["batch_errors"] += 1
+            meta.setdefault("batch_error_last", str(e))
             continue
 
-    df=pd.DataFrame(rows)
-    if df.empty:
-        return df, {}
-    # hygiene + mass enforcement on primary and each column
-    for pct in pcts:
-        col=f"prob_{pct}"
-        apply_probability_hygiene(df, col, settings)
-    # mass enforcement on primary column (closest match)
-    primary_col=f"prob_{primary}" if f"prob_{primary}" in df.columns else f"prob_{pcts[-1]}"
-    target_sum = min(float(getattr(settings,"prob_mass_target_abs_max",12)), float(getattr(settings,"prob_mass_target_mult",2.0))*5.0)
-    temp=enforce_probability_mass(df, [c for c in df.columns if c.startswith("prob_")], primary_col, target_sum)
-    meta["prob_mass_temp"]=temp
-    # produce standardized columns
-    def getprob(p):
-        col=f"prob_{p}"
-        return df[col] if col in df.columns else 0.0
-    df["prob_2"]=getprob(2.0)
-    df["prob_5"]=getprob(5.0)
-    df["prob_10"]=getprob(10.0)
-    df["prob_primary"]=df[primary_col]
-    return df, meta
+    models = await load_models(settings)
+    rows=[]
+    for pid in product_ids:
+        df = all_bars.get(pid)
+        if df is None or df.empty:
+            meta["skipped"]["no_bars"] += 1
+            continue
+        # normalize
+        df = df.copy()
+        df["time"] = pd.to_datetime(df["time"], utc=True)
+        df = df.set_index("time").sort_index()
+        # basic sufficiency
+        if len(df) < min_bars:
+            meta["skipped"]["too_few_bars"] += 1
+            continue
+
+        # liquidity: last 6 hours notional volume
+        tail = df.tail(72)  # 72*5m = 6h
+        notional = float((tail["volume"] * tail["close"]).sum())
+        if notional < min_notional:
+            meta["skipped"]["illiquid"] += 1
+            continue
+
+        base_price = float(df["close"].iloc[-1])
+
+        # compute features per threshold; some features depend on target_pct
+        probs={}
+        feats_cache={}
+        for pct in thresholds:
+            target_pct = float(pct) / 100.0
+            feats = compute_features(df5=df, df1=None, btc5=btc_df, now=now, horizon_end=horizon_end, target_pct=target_pct)
+            feats_cache[pct]=feats
+            art = models.get(pct)
+            if isinstance(art, ModelArtifacts) and art.trained:
+                # model returns calibrated probability
+                try:
+                    p = float(art.predict_proba(pd.DataFrame([feats]))[0])
+                except Exception:
+                    p = _fallback_prob(feats, pct)
+            else:
+                p = _fallback_prob(feats, pct)
+            probs[pct]=float(np.clip(p, 0.0, 1.0))
+
+        # enforce monotonicity: smaller threshold must be >= larger threshold
+        for a,b in zip(thresholds, thresholds[1:]):
+            probs[b] = min(probs[b], probs[a])
+
+        # expose key diagnostics from the primary threshold (smallest)
+        primary = thresholds[0] if thresholds else 2
+        feats0 = feats_cache.get(primary, {})
+        rows.append({
+            "product_id": pid,
+            "price": base_price,
+            "notional_6h": notional,
+            "atr_pct": float(feats0.get("atr_pct", 0.0)),
+            "rvol": float(feats0.get("rvol", 0.0)),
+            "ret_30m": float(feats0.get("ret_30m", 0.0)),
+            "vwap_loc": float(feats0.get("vwap_loc", 0.0)),
+            "dist_to_target_atr": float(feats0.get("dist_to_target_atr", 0.0)),
+            **{f"prob_{pct}": probs[pct] for pct in thresholds},
+            "updated_utc": meta["now_utc"],
+        })
+
+    df_out = pd.DataFrame(rows)
+    if not df_out.empty:
+        # sort by smallest threshold probability desc
+        df_out.sort_values(by=f"prob_{thresholds[0]}", ascending=False, inplace=True)
+    meta["scored"] = int(len(df_out))
+    meta["total_universe"] = int(len(product_ids))
+    return df_out, meta
+

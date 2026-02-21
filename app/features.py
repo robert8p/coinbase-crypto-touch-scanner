@@ -8,12 +8,11 @@ from .indicators import ema, atr, realized_vol, adx
 
 FEATURES = [
     "ret_5m","ret_30m",
-    "ema_align","adx14",
+    "ema_9_21","ema_21_55","ema21_slope","adx14",
     "atr_pct","rv_30m",
     "rvol","obv_slope",
     "vwap_loc","dist_to_high",
     "btc_ret_30m",
-    "time_to_horizon_frac",
     "range_so_far_atr",
     "dist_to_target_atr",
 ]
@@ -25,14 +24,23 @@ def candles_to_df(candles: List[List[float]]) -> pd.DataFrame:
     df = df.set_index("ts").sort_index()
     return df
 
-def compute_features(df5: pd.DataFrame, df1: pd.DataFrame, btc5: Optional[pd.DataFrame], now: datetime, horizon_end: datetime, target_pct: float) -> Dict[str, float]:
+def compute_features(
+    df5: pd.DataFrame,
+    df1: Optional[pd.DataFrame],
+    btc5: Optional[pd.DataFrame],
+    now: datetime,
+    horizon_end: datetime,
+    target_pct: float,
+) -> Dict[str, float]:
     close=df5["close"]
     ret5 = close.pct_change(1)
     ret_5m = float(ret5.iloc[-1]) if len(ret5) else 0.0
     ret_30m = float(close.pct_change(6).iloc[-1]) if len(close) > 6 else 0.0
 
     e9=ema(close,9); e21=ema(close,21); e55=ema(close,55)
-    ema_align = float((e9.iloc[-1]>e21.iloc[-1]) and (e21.iloc[-1]>e55.iloc[-1])) if len(close)>=55 else 0.0
+    ema_9_21 = float((e9.iloc[-1]-e21.iloc[-1])/(close.iloc[-1]+1e-9)) if len(close)>=21 else 0.0
+    ema_21_55 = float((e21.iloc[-1]-e55.iloc[-1])/(close.iloc[-1]+1e-9)) if len(close)>=55 else 0.0
+    ema21_slope = float((e21.iloc[-1]-e21.iloc[-6])/(close.iloc[-1]+1e-9)) if len(e21)>=6 else 0.0
     adx14 = float(adx(df5,14).iloc[-1]) if len(df5)>=30 else 0.0
 
     atr14 = atr(df5,14)
@@ -51,10 +59,12 @@ def compute_features(df5: pd.DataFrame, df1: pd.DataFrame, btc5: Optional[pd.Dat
     obv = (direction * vol).cumsum()
     obv_slope = float((obv.iloc[-1]-obv.iloc[-7])/(abs(obv.iloc[-7])+1e-9)) if len(obv)>7 else 0.0
 
-    # VWAP (today-ish over df1 window)
-    tp = (df1["high"]+df1["low"]+df1["close"])/3.0
-    vwap = float((tp*df1["volume"]).sum()/(df1["volume"].sum()+1e-9))
-    vwap_loc = float((df1["close"].iloc[-1]-vwap)/(atr_last+1e-9))
+    # VWAP over the available window.
+    # We prefer 1m candles if provided, but fall back to 5m to reduce API calls.
+    base = df1 if (df1 is not None and len(df1) > 0) else df5
+    tp = (base["high"] + base["low"] + base["close"]) / 3.0
+    vwap = float((tp * base["volume"]).sum() / (base["volume"].sum() + 1e-9))
+    vwap_loc = float((base["close"].iloc[-1] - vwap) / (atr_last + 1e-9))
 
     # dist to high last 12 bars (1h)
     recent_high = float(df5["high"].tail(12).max())
@@ -65,18 +75,18 @@ def compute_features(df5: pd.DataFrame, df1: pd.DataFrame, btc5: Optional[pd.Dat
         btc_ret_30m = float(btc5["close"].pct_change(6).iloc[-1])
 
     # time to horizon
-    tfrac = float(max(0.0, (horizon_end-now).total_seconds()) / (5*3600))
-    tfrac = float(min(1.0, tfrac))
 
     # range so far in ATR (past 1h)
     rng = float((df5["high"].tail(12).max()-df5["low"].tail(12).min())/(atr_last+1e-9))
 
-    dist_to_target_atr = float((target_pct/100.0)/(atr_pct+1e-9))
+    dist_to_target_atr = float((target_pct)/(atr_pct+1e-9))
 
     return {
         "ret_5m": ret_5m,
         "ret_30m": ret_30m,
-        "ema_align": ema_align,
+        "ema_9_21": ema_9_21,
+        "ema_21_55": ema_21_55,
+        "ema21_slope": ema21_slope,
         "adx14": adx14,
         "atr_pct": atr_pct,
         "rv_30m": rv_30m,
@@ -85,9 +95,8 @@ def compute_features(df5: pd.DataFrame, df1: pd.DataFrame, btc5: Optional[pd.Dat
         "vwap_loc": vwap_loc,
         "dist_to_high": dist_to_high,
         "btc_ret_30m": btc_ret_30m,
-        "time_to_horizon_frac": tfrac,
-        "range_so_far_atr": rng,
+                "range_so_far_atr": rng,
         "dist_to_target_atr": dist_to_target_atr,
         "vwap": vwap,
-        "price": float(df1["close"].iloc[-1]),
+        "price": float(base["close"].iloc[-1]),
     }

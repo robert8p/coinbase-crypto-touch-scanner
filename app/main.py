@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, Request, Query, Form
@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from .config import get_settings, Settings
 from .logging_utils import setup_logging
 from .coinbase import CoinbaseClient
+from .alpaca_crypto import AlpacaCryptoClient
 from .scoring import compute_scores, parse_pcts
 from .state import AppState, SymbolScore
 
@@ -30,6 +31,7 @@ templates = Jinja2Templates(directory=str(templates_path))
 STATE = AppState()
 SETTINGS: Optional[Settings] = None
 CB: Optional[CoinbaseClient] = None
+ALPACA: Optional[AlpacaCryptoClient] = None
 PRODUCTS: List[str] = []
 
 try:
@@ -42,16 +44,30 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 async def refresh_products():
+    """Refresh Coinbase-tradeable products list (universe).
+
+    We only use Coinbase for the list of tradeable products; all OHLCV data comes from Alpaca Crypto.
+    """
     global PRODUCTS
     assert CB and SETTINGS
-    prods = await CB.get_products()
-    # filter to quote currency and online status
+    prods = await CB.list_products()
     quote = SETTINGS.quote_currency.upper()
-    candidates = [p.product_id for p in prods if p.quote_currency.upper()==quote and p.status=="online"]
-    # rank by 24h volume (quote volume proxy via stats volume*price is heavy; use stats "volume" base)
-    # To keep rate limits sane, just take first MAX_PRODUCTS if stats ranking fails.
-    top = candidates[: SETTINGS.max_products]
-    PRODUCTS = top
+    candidates: List[str] = []
+    for p in prods:
+        try:
+            if str(p.get("status", "")).lower() != "online":
+                continue
+            if str(p.get("quote_currency", "")).upper() != quote:
+                continue
+            if p.get("trading_disabled") is True:
+                continue
+            pid = str(p.get("id"))
+            if pid and "-" in pid:
+                candidates.append(pid)
+        except Exception:
+            continue
+    # If MAX_PRODUCTS > 0, take first N; else take all. Liquidity gates are applied later.
+    PRODUCTS = candidates if (SETTINGS.max_products is None or SETTINGS.max_products <= 0) else candidates[: int(SETTINGS.max_products)]
     return PRODUCTS
 
 async def score_cycle():
@@ -63,7 +79,7 @@ async def score_cycle():
             except Exception as e:
                 logger.warning(f"Product refresh failed: {type(e).__name__}: {e}")
                 # proceed with empty universe; API will return 0 rows + last_error in status.
-        df, meta = await compute_scores(SETTINGS, CB, PRODUCTS)
+        df, meta = await compute_scores(SETTINGS, CB, ALPACA, PRODUCTS)
         updated=_utcnow()
         with STATE.lock:
             STATE.last_run_utc = updated
@@ -103,7 +119,22 @@ async def startup():
     global SETTINGS, CB
     SETTINGS = get_settings()
     (Path(SETTINGS.model_dir)).mkdir(parents=True, exist_ok=True)
-    CB = CoinbaseClient(SETTINGS.coinbase_base_url, timeout_seconds=SETTINGS.coinbase_timeout_seconds, max_concurrency=SETTINGS.coinbase_max_concurrency)
+    ALPACA = AlpacaCryptoClient(
+        api_key=SETTINGS.alpaca_api_key,
+        api_secret=SETTINGS.alpaca_api_secret,
+        base_url=SETTINGS.alpaca_data_base_url,
+        location=SETTINGS.alpaca_crypto_location,
+        timeout=float(SETTINGS.alpaca_timeout_seconds),
+        max_concurrency=int(SETTINGS.alpaca_max_concurrency),
+    )
+    CB = CoinbaseClient(
+        SETTINGS.coinbase_base_url,
+        timeout_seconds=SETTINGS.coinbase_timeout_seconds,
+        max_concurrency=SETTINGS.coinbase_max_concurrency,
+        max_retries=SETTINGS.coinbase_max_retries,
+        backoff_base_seconds=SETTINGS.coinbase_backoff_base_seconds,
+        requests_per_second=SETTINGS.coinbase_requests_per_second,
+    )
     # Do not let startup fail if Coinbase is temporarily unreachable
     try:
         await refresh_products()
@@ -197,7 +228,7 @@ def api_symbol(product_id: str):
 async def api_series(product_id: str):
     assert CB
     now = datetime.now(timezone.utc)
-    c5 = await CB.get_candles(product_id, now-datetime.timedelta(hours=8), now, 300)
+    c5 = await CB.get_candles(product_id, now - timedelta(hours=8), now, 300)
     # fallback if no data
     return {"candles_5m": c5}
 
