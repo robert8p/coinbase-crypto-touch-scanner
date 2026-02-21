@@ -140,6 +140,7 @@ async def api_status(settings: Settings = Depends(get_settings)):
             "universe_last_refresh_utc": APP_STATE.universe_last_refresh_utc,
             "last_scan_utc": APP_STATE.last_scan_utc,
             "last_scan_error": APP_STATE.last_scan_error,
+            "last_scan_diag": APP_STATE.last_scan_diag,
             "training": APP_STATE.training.__dict__,
         }
 

@@ -38,6 +38,7 @@ class AppState:
     last_scan_utc: Optional[str] = None
     last_scan_error: Optional[str] = None
     last_scan_rows: List[Dict[str, Any]] = field(default_factory=list)
+    last_scan_diag: Dict[str, Any] = field(default_factory=dict)
 
     # Alpaca symbol rejections (invalid / unsupported)
     alpaca_bad_symbols: Dict[str, str] = field(default_factory=dict)

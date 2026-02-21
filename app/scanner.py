@@ -321,13 +321,24 @@ async def scan_once(settings: Settings) -> None:
     bundles = load_models(settings.model_dir, target_pcts)
 
     rows_out: List[Dict[str, Any]] = []
+    rows_out_nogate: List[Dict[str, Any]] = []
+    diag: Dict[str, Any] = {
+        "symbols_total": len(symbols_data),
+        "symbols_with_bars5_ge_20": 0,
+        "skip_short_bars5": 0,
+        "skip_p0_missing": 0,
+        "skip_features_empty": 0,
+        "skip_notional_gate": 0,
+        "scored": 0,
+    }
+    for _s in symbols_data:
+        if len(sorted(bars5.get(_s, []), key=lambda b: b.get("t", ""))) >= 20:
+            diag["symbols_with_bars5_ge_20"] += 1
 
     for sym in symbols_data:
-        if sym in {"BTC/USD", "ETH/USD"}:
-            continue
-
         bars5_sym = sorted(bars5.get(sym, []), key=lambda b: b.get("t", ""))
         if len(bars5_sym) < 20:
+            diag["skip_short_bars5"] += 1
             continue
 
         # Determine P0
@@ -356,17 +367,17 @@ async def scan_once(settings: Settings) -> None:
                     p0 = float("nan")
 
         if not np.isfinite(p0) or p0 <= 0:
+            diag["skip_p0_missing"] += 1
             continue
 
         feats = compute_features_5m_fast(bars5_sym, p0, target_pcts)
         if not feats:
+            diag["skip_features_empty"] += 1
             continue
 
         feats.update(reg)
 
         notional_6h = float(feats.get("notional_6h", 0.0))
-        if np.isfinite(notional_6h) and notional_6h < settings.min_notional_volume_6h:
-            continue
 
         probs = score_symbol(
             bundles=bundles,
@@ -393,7 +404,24 @@ async def scan_once(settings: Settings) -> None:
         if 2 in target_pcts:
             row["dist_to_target_atr_2"] = float(feats.get("dist_to_target_atr_2", float("nan")))
 
+        # Always keep a candidate (in case the liquidity gate excludes everything)
+        rows_out_nogate.append(row)
+
+        if np.isfinite(notional_6h) and notional_6h < settings.min_notional_volume_6h:
+            diag["skip_notional_gate"] += 1
+            continue
+
         rows_out.append(row)
+        diag["scored"] += 1
+
+    # If liquidity gate excluded everything, show candidates anyway (flagging it)
+    if (not rows_out) and rows_out_nogate:
+        rows_out = rows_out_nogate
+        diag["liquidity_gate_bypassed"] = True
+        with APP_STATE.lock:
+            APP_STATE.last_scan_error = (
+                f"Liquidity gate MIN_NOTIONAL_VOLUME_6H={settings.min_notional_volume_6h:g} excluded all; showing results anyway. Tune MIN_NOTIONAL_VOLUME_6H."
+            )
 
     # Universe-level sanity soften
     rows_out, temp = temperature_soften_probs(
@@ -410,7 +438,10 @@ async def scan_once(settings: Settings) -> None:
     with APP_STATE.lock:
         APP_STATE.last_scan_rows = rows_out
         APP_STATE.last_scan_utc = now.isoformat()
-        APP_STATE.last_scan_error = None
+        APP_STATE.last_scan_diag = diag
+        # Preserve any non-fatal warning already set in last_scan_error
+        if APP_STATE.last_scan_error is None:
+            APP_STATE.last_scan_error = None
 
 
 def _scan_demo(settings: Settings) -> None:
