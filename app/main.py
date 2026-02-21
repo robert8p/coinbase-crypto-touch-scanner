@@ -132,6 +132,8 @@ async def api_status(settings: Settings = Depends(get_settings)):
             "demo_mode": settings.demo_mode,
             "coinbase": APP_STATE.coinbase.__dict__,
             "alpaca": APP_STATE.alpaca.__dict__,
+            "alpaca_bad_symbols_count": len(APP_STATE.alpaca_bad_symbols),
+            "alpaca_bad_symbols_sample": list(APP_STATE.alpaca_bad_symbols.keys())[:10],
             "universe_count": uni_count,
             "scored_count": scored_count,
             "universe_last_refresh_utc": APP_STATE.universe_last_refresh_utc,

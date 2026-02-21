@@ -106,6 +106,9 @@ async def scan_once(settings: Settings) -> None:
     with APP_STATE.lock:
         products = list(APP_STATE.universe)
 
+    with APP_STATE.lock:
+        bad_syms = set(APP_STATE.alpaca_bad_symbols.keys())
+
     target_pcts = settings.target_pcts()
     horizon_steps = settings.horizon_steps()
 
@@ -122,6 +125,8 @@ async def scan_once(settings: Settings) -> None:
             symbols.append(s)
 
     symbols = sorted(set(symbols))
+    # Avoid repeatedly requesting symbols Alpaca has rejected
+    symbols = [s for s in symbols if (s in {"BTC/USD", "ETH/USD"} or s not in bad_syms)]
 
     alpaca = AlpacaClient(
         key=settings.alpaca_api_key,
@@ -165,10 +170,28 @@ async def scan_once(settings: Settings) -> None:
             max_symbols_per_request=settings.alpaca_max_symbols_per_request,
         )
 
+        # Record any Alpaca symbol rejections / partial batch failures
+        if getattr(alpaca, \"bad_symbols_last\", None):
+            with APP_STATE.lock:
+                for s in alpaca.bad_symbols_last:
+                    APP_STATE.alpaca_bad_symbols[s] = now.isoformat()
+                if len(APP_STATE.alpaca_bad_symbols) > 2000:
+                    for k in list(APP_STATE.alpaca_bad_symbols.keys())[:200]:
+                        APP_STATE.alpaca_bad_symbols.pop(k, None)
+
+        # If we got partial errors but some data, surface as a non-fatal warning
+        if getattr(alpaca, \"batch_errors_last\", None) and bars5_new:
+            warn = f\"Alpaca batch partial failures: {len(alpaca.batch_errors_last)} (continuing).\"
+            with APP_STATE.lock:
+                APP_STATE.alpaca.last_error = warn
+
+        # Only request 1m bars/quotes for symbols that actually returned 5m bars
+        symbols_data = sorted(set(bars5_new.keys()) | {\"BTC/USD\", \"ETH/USD\"})
+
         # Merge 5m cache
         if full_fetch:
             merged = {}
-            for sym in symbols:
+            for sym in symbols_data:
                 rows = sorted(bars5_new.get(sym, []), key=lambda b: b.get("t", ""))
                 merged[sym] = rows
         else:
@@ -198,7 +221,7 @@ async def scan_once(settings: Settings) -> None:
 
         # Fetch last 3 minutes of 1m bars for fallback close
         bars1 = await alpaca.fetch_bars_batched(
-            symbols,
+            symbols_data,
             timeframe="1Min",
             start=now - timedelta(minutes=3),
             end=now,
@@ -206,12 +229,13 @@ async def scan_once(settings: Settings) -> None:
         )
 
         quotes = await alpaca.fetch_latest_quotes_batched(
-            symbols,
+            symbols_data,
             max_symbols_per_request=max(50, settings.alpaca_max_symbols_per_request // 2),
         )
 
         with APP_STATE.lock:
-            APP_STATE.alpaca.last_error = None
+            if not APP_STATE.alpaca.last_error:
+                APP_STATE.alpaca.last_error = None
 
     except Exception as e:
         s = str(e)
@@ -245,7 +269,7 @@ async def scan_once(settings: Settings) -> None:
 
     rows_out: List[Dict[str, Any]] = []
 
-    for sym in symbols:
+    for sym in symbols_data:
         if sym in {"BTC/USD", "ETH/USD"}:
             continue
 

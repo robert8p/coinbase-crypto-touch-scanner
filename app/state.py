@@ -39,6 +39,9 @@ class AppState:
     last_scan_error: Optional[str] = None
     last_scan_rows: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Alpaca symbol rejections (invalid / unsupported)
+    alpaca_bad_symbols: Dict[str, str] = field(default_factory=dict)
+
     # Cached bars (to reduce API load)
     bars5_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     bars5_cache_last_utc: Optional[str] = None
