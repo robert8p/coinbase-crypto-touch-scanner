@@ -1,27 +1,63 @@
 from __future__ import annotations
+
+import threading
 from dataclasses import dataclass, field
-from datetime import datetime
-from threading import Lock
-from typing import Dict, Any, Optional, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 @dataclass
-class SymbolScore:
-    product_id: str
-    prob_2: float
-    prob_5: float
-    prob_10: float
-    updated_utc: datetime
-    price: float
-    vwap: float
-    reasons: Dict[str, Any] = field(default_factory=dict)
-    contrib: List[Dict[str, Any]] = field(default_factory=list)
+class ApiDiag:
+    last_request_utc: Optional[str] = None
+    last_error: Optional[str] = None
+    rate_limit_warn: Optional[str] = None
+
+
+@dataclass
+class TrainingDiag:
+    running: bool = False
+    last_started_utc: Optional[str] = None
+    last_finished_utc: Optional[str] = None
+    last_error: Optional[str] = None
+    last_summary: Optional[Dict[str, Any]] = None
+
 
 @dataclass
 class AppState:
-    lock: Lock = field(default_factory=Lock)
-    last_scores: Dict[str, SymbolScore] = field(default_factory=dict)
-    last_run_utc: Optional[datetime] = None
-    last_error: Optional[str] = None
-    training_running: bool = False
-    training_last_error: Optional[str] = None
-    training_last_result: Optional[str] = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # Universe
+    universe: List[Dict[str, Any]] = field(default_factory=list)
+    universe_last_refresh_utc: Optional[str] = None
+
+    # Scan
+    last_scan_utc: Optional[str] = None
+    last_scan_error: Optional[str] = None
+    last_scan_rows: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Cached bars (to reduce API load)
+    bars5_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    bars5_cache_last_utc: Optional[str] = None
+
+    # Diagnostics
+    coinbase: ApiDiag = field(default_factory=ApiDiag)
+    alpaca: ApiDiag = field(default_factory=ApiDiag)
+    training: TrainingDiag = field(default_factory=TrainingDiag)
+
+    # Model
+    model_loaded: Dict[str, Any] = field(default_factory=dict)
+
+    def set_coinbase_request(self):
+        self.coinbase.last_request_utc = utcnow().isoformat()
+        self.coinbase.rate_limit_warn = None
+
+    def set_alpaca_request(self):
+        self.alpaca.last_request_utc = utcnow().isoformat()
+        self.alpaca.rate_limit_warn = None
+
+
+APP_STATE = AppState()

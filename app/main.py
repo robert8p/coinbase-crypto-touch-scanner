@@ -1,261 +1,254 @@
 from __future__ import annotations
+
 import asyncio
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, Request, Query, Form
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import anyio
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .config import get_settings, Settings
-from .logging_utils import setup_logging
-from .coinbase import CoinbaseClient
-from .alpaca_crypto import AlpacaCryptoClient
-from .scoring import compute_scores, parse_pcts
-from .state import AppState, SymbolScore
+from app.config import Settings, get_settings
+from app.scanner import refresh_universe, scan_once
+from app.state import APP_STATE
+from app.training import train_all
+from app.utils.logging import setup_logging
+from app.utils.modeling import load_models
 
-logger = setup_logging()
-app = FastAPI(title="Coinbase Crypto Touch Scanner")
-BASE_DIR = Path(__file__).resolve().parent
-static_path = BASE_DIR / "static"
-templates_path = BASE_DIR / "templates"
-# Ensure directories exist even if repo has no assets/templates (prevents Render startup crashes)
-try:
-    templates_path.mkdir(parents=True, exist_ok=True)
-    static_path.mkdir(parents=True, exist_ok=True)
-except Exception:
-    pass
-templates = Jinja2Templates(directory=str(templates_path))
 
-STATE = AppState()
-SETTINGS: Optional[Settings] = None
-CB: Optional[CoinbaseClient] = None
-ALPACA: Optional[AlpacaCryptoClient] = None
-PRODUCTS: List[str] = []
+log = logging.getLogger("main")
 
-try:
-    app.mount("/static", StaticFiles(directory=str(static_path), check_dir=False), name="static")
-except Exception as e:
-    # Never hard-fail on static mount (Render requires app import to succeed)
-    print(f"WARN: failed to mount /static: {e}")
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-def _utcnow():
-    return datetime.now(timezone.utc)
+app = FastAPI(title="Crypto Touch Probability Scanner", version="1.0.0")
 
-async def refresh_products():
-    """Refresh Coinbase-tradeable products list (universe).
+# Ensure dirs exist (avoid startup crashes if missing)
+os.makedirs(STATIC_DIR, exist_ok=True)
+os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
-    We only use Coinbase for the list of tradeable products; all OHLCV data comes from Alpaca Crypto.
-    """
-    global PRODUCTS
-    assert CB and SETTINGS
-    prods = await CB.list_products()
-    quote = SETTINGS.quote_currency.upper()
-    candidates: List[str] = []
-    for p in prods:
-        try:
-            if str(p.get("status", "")).lower() != "online":
-                continue
-            if str(p.get("quote_currency", "")).upper() != quote:
-                continue
-            if p.get("trading_disabled") is True:
-                continue
-            pid = str(p.get("id"))
-            if pid and "-" in pid:
-                candidates.append(pid)
-        except Exception:
-            continue
-    # If MAX_PRODUCTS > 0, take first N; else take all. Liquidity gates are applied later.
-    PRODUCTS = candidates if (SETTINGS.max_products is None or SETTINGS.max_products <= 0) else candidates[: int(SETTINGS.max_products)]
-    return PRODUCTS
+# Mount static
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-async def score_cycle():
-    global PRODUCTS
-    try:
-        if not PRODUCTS:
-            try:
-                await refresh_products()
-            except Exception as e:
-                logger.warning(f"Product refresh failed: {type(e).__name__}: {e}")
-                # proceed with empty universe; API will return 0 rows + last_error in status.
-        df, meta = await compute_scores(SETTINGS, CB, ALPACA, PRODUCTS)
-        updated=_utcnow()
-        with STATE.lock:
-            STATE.last_run_utc = updated
-            STATE.last_error = None
-            STATE.last_scores.clear()
-            for _, r in df.iterrows():
-                pid = r["product_id"]
-                STATE.last_scores[pid] = SymbolScore(
-                    product_id=pid,
-                    prob_2=float(r.get("prob_2",0.0)),
-                    prob_5=float(r.get("prob_5",0.0)),
-                    prob_10=float(r.get("prob_10",0.0)),
-                    updated_utc=updated,
-                    price=float(r.get("price",0.0)),
-                    vwap=float(r.get("vwap",0.0)),
-                    reasons={"meta": meta},
-                    contrib=[]
-                )
-    except Exception as e:
-        logger.exception("score cycle failed")
-        with STATE.lock:
-            STATE.last_error = f"{type(e).__name__}: {e}"
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-async def scheduler_loop():
-    assert SETTINGS
-    interval = int(SETTINGS.scan_interval_minutes)
+scan_lock = asyncio.Lock()
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _require_admin(password: str, x_admin_password: Optional[str]) -> None:
+    if not password:
+        raise HTTPException(status_code=500, detail="ADMIN_PASSWORD is not set")
+    if not x_admin_password or x_admin_password != password:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _model_status(settings: Settings) -> Dict[str, Any]:
+    pcts = settings.target_pcts()
+    bundles = load_models(settings.model_dir, pcts)
+    out: Dict[str, Any] = {}
+    for pct in pcts:
+        b = bundles.get(pct)
+        out[str(pct)] = {
+            "present": b is not None,
+            "has_calibrator": bool(b and b.calibrator),
+            "meta": (b.meta if b else None),
+        }
+    return out
+
+
+async def _scan_loop(settings: Settings):
+    # initial small delay for cold starts
+    await asyncio.sleep(0.5)
     while True:
-        start = _utcnow()
-        await score_cycle()
-        # align to interval
-        elapsed = (_utcnow()-start).total_seconds()
-        sleep_for = max(1.0, interval*60 - elapsed)
-        await asyncio.sleep(sleep_for)
+        async with scan_lock:
+            try:
+                if (not settings.demo_mode) and (not settings.alpaca_api_key or not settings.alpaca_api_secret):
+                    with APP_STATE.lock:
+                        APP_STATE.last_scan_error = "ALPACA_API_KEY/ALPACA_API_SECRET missing (set DEMO_MODE=true to run without external APIs)"
+                        APP_STATE.last_scan_utc = _utcnow_iso()
+                else:
+                    await scan_once(settings)
+            except Exception as e:
+                with APP_STATE.lock:
+                    APP_STATE.last_scan_error = str(e)
+                    APP_STATE.last_scan_utc = _utcnow_iso()
+                log.exception("scan failed")
+        await asyncio.sleep(max(30, int(settings.scan_interval_minutes) * 60))
+
 
 @app.on_event("startup")
-async def startup():
-    global SETTINGS, CB
-    SETTINGS = get_settings()
-    (Path(SETTINGS.model_dir)).mkdir(parents=True, exist_ok=True)
-    ALPACA = AlpacaCryptoClient(
-        api_key=SETTINGS.alpaca_api_key,
-        api_secret=SETTINGS.alpaca_api_secret,
-        base_url=SETTINGS.alpaca_data_base_url,
-        location=SETTINGS.alpaca_crypto_location,
-        timeout=float(SETTINGS.alpaca_timeout_seconds),
-        max_concurrency=int(SETTINGS.alpaca_max_concurrency),
-    )
-    CB = CoinbaseClient(
-        SETTINGS.coinbase_base_url,
-        timeout_seconds=float(getattr(SETTINGS,'coinbase_timeout_seconds',10.0)),
-        max_concurrency=SETTINGS.coinbase_max_concurrency,
-        max_retries=SETTINGS.coinbase_max_retries,
-        backoff_base_seconds=SETTINGS.coinbase_backoff_base_seconds,
-        requests_per_second=SETTINGS.coinbase_requests_per_second,
-    )
-    # Do not let startup fail if Coinbase is temporarily unreachable
-    try:
-        await refresh_products()
-    except Exception as e:
-        logger.warning(f"Product refresh failed on startup: {type(e).__name__}: {e}")
-    if SETTINGS.scheduler_enabled:
-        asyncio.create_task(scheduler_loop())
-        logger.info("Started scheduler")
+async def on_startup():
+    settings = get_settings()
+    setup_logging(settings.log_level)
 
-@app.on_event("shutdown")
-async def shutdown():
-    if CB:
-        await CB.close()
+    # Ensure dirs
+    os.makedirs(settings.model_dir, exist_ok=True)
+    os.makedirs(STATIC_DIR, exist_ok=True)
+    os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
-@app.get("/health")
-def health():
-    return {"ok": True}
+    # Start scanner loop
+    asyncio.create_task(_scan_loop(settings))
+
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request):
+async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-@app.get("/symbol/{product_id}", response_class=HTMLResponse)
-def symbol_page(request: Request, product_id: str):
-    return templates.TemplateResponse("symbol.html", {"request": request, "product_id": product_id})
 
-@app.get("/api/status")
-def api_status():
-    with STATE.lock:
-        return {
-            "demo_mode": bool(getattr(SETTINGS,"demo_mode",False)) if SETTINGS else False,
-            "now_utc": _utcnow().isoformat().replace("+00:00","Z"),
-            "alpaca": None,
-            "coinbase": {
-                "ok": True if CB else False,
-                "base_url": SETTINGS.coinbase_base_url if SETTINGS else None,
-                "last_request_utc": None,
-            },
-            "universe_count": len(PRODUCTS),
-            "model": {"thresholds": parse_pcts(SETTINGS.target_move_pcts) if SETTINGS else []},
-            "training": {
-                "running": STATE.training_running,
-                "last_result": STATE.training_last_result,
-                "last_error": STATE.training_last_error,
-            },
-            "last_run_utc": STATE.last_run_utc.isoformat().replace("+00:00","Z") if STATE.last_run_utc else None,
-            "scores_count": len(STATE.last_scores),
-            "last_error": STATE.last_error,
-        }
+@app.head("/")
+async def index_head():
+    return HTMLResponse(status_code=200)
 
-@app.get("/api/scores")
-def api_scores(min_prob: float = Query(0.0), limit: int = Query(200)):
-    with STATE.lock:
-        items = list(STATE.last_scores.values())
-    # sort by prob_2 desc
-    items.sort(key=lambda x: x.prob_2, reverse=True)
-    out=[]
-    for it in items:
-        if it.prob_2 < min_prob:
-            continue
-        out.append({
-            "product_id": it.product_id,
-            "prob_2": round(it.prob_2,4),
-            "prob_5": round(it.prob_5,4),
-            "prob_10": round(it.prob_10,4),
-            "price": it.price,
-            "vwap": it.vwap,
-            "updated_utc": it.updated_utc.isoformat().replace("+00:00","Z"),
-        })
-        if len(out)>=limit:
-            break
-    return {"rows": out, "last_run_utc": STATE.last_run_utc.isoformat().replace("+00:00","Z") if STATE.last_run_utc else None, "last_error": STATE.last_error}
 
-@app.get("/api/symbol/{product_id}")
-def api_symbol(product_id: str):
-    with STATE.lock:
-        it = STATE.last_scores.get(product_id)
-    if not it:
-        return JSONResponse({"detail":"Not Found"}, status_code=404)
+@app.get("/api/scan")
+async def api_scan(settings: Settings = Depends(get_settings)):
+    with APP_STATE.lock:
+        rows = list(APP_STATE.last_scan_rows)
+        last_scan_utc = APP_STATE.last_scan_utc
+        err = APP_STATE.last_scan_error
+
     return {
-        "product_id": it.product_id,
-        "prob_2": it.prob_2,
-        "prob_5": it.prob_5,
-        "prob_10": it.prob_10,
-        "price": it.price,
-        "vwap": it.vwap,
-        "updated_utc": it.updated_utc.isoformat().replace("+00:00","Z"),
+        "last_scan_utc": last_scan_utc,
+        "error": err,
+        "rows": rows,
     }
 
-@app.get("/api/symbol/{product_id}/series")
-async def api_series(product_id: str):
-    assert CB
-    now = datetime.now(timezone.utc)
-    c5 = await CB.get_candles(product_id, now - timedelta(hours=8), now, 300)
-    # fallback if no data
-    return {"candles_5m": c5}
 
-@app.get("/train", response_class=HTMLResponse)
-def train_page(request: Request):
-    return templates.TemplateResponse("train.html", {"request": request, "error": None, "result": None})
+@app.get("/api/status")
+async def api_status(settings: Settings = Depends(get_settings)):
+    with APP_STATE.lock:
+        uni_count = len(APP_STATE.universe)
+        scored_count = len(APP_STATE.last_scan_rows)
+        state = {
+            "demo_mode": settings.demo_mode,
+            "coinbase": APP_STATE.coinbase.__dict__,
+            "alpaca": APP_STATE.alpaca.__dict__,
+            "universe_count": uni_count,
+            "scored_count": scored_count,
+            "universe_last_refresh_utc": APP_STATE.universe_last_refresh_utc,
+            "last_scan_utc": APP_STATE.last_scan_utc,
+            "last_scan_error": APP_STATE.last_scan_error,
+            "training": APP_STATE.training.__dict__,
+        }
 
-@app.post("/train", response_class=HTMLResponse)
-def train_start(request: Request, password: str = Form(...)):
-    if not SETTINGS.admin_password or password != SETTINGS.admin_password:
-        return templates.TemplateResponse("train.html", {"request": request, "error": "Invalid admin password.", "result": None})
-    # Minimal: mark training running; actual training requires heavy data pulls; we run in background task.
-    if STATE.training_running:
-        return templates.TemplateResponse("train.html", {"request": request, "error": None, "result": "Training already running."})
-    STATE.training_running = True
-    async def _run():
-        try:
-            from .train import train_all
-            res = await train_all(SETTINGS, CB, PRODUCTS)
-            with STATE.lock:
-                STATE.training_last_result = json.dumps(res)
-                STATE.training_last_error = None
-        except Exception as e:
-            with STATE.lock:
-                STATE.training_last_error = f"{type(e).__name__}: {e}"
-        finally:
-            with STATE.lock:
-                STATE.training_running = False
-    asyncio.create_task(_run())
-    return templates.TemplateResponse("train.html", {"request": request, "error": None, "result": "Training started (lightweight placeholder)."})
+    state["models"] = _model_status(settings)
+    state["config"] = {
+        "target_move_pcts": settings.target_pcts(),
+        "horizon_hours": settings.horizon_hours,
+        "scan_interval_minutes": settings.scan_interval_minutes,
+        "min_notional_volume_6h": settings.min_notional_volume_6h,
+        "alpaca_crypto_location": settings.alpaca_crypto_location,
+        "coinbase_base_url": settings.coinbase_base_url,
+    }
+
+    return state
+
+
+@app.post("/admin/universe/refresh")
+async def admin_refresh_universe(
+    settings: Settings = Depends(get_settings),
+    x_admin_password: Optional[str] = Header(default=None, alias="X-Admin-Password"),
+):
+    _require_admin(settings.admin_password, x_admin_password)
+    await refresh_universe(settings)
+    return {"ok": True, "universe_count": len(APP_STATE.universe)}
+
+
+@app.post("/admin/train")
+async def admin_train(
+    settings: Settings = Depends(get_settings),
+    x_admin_password: Optional[str] = Header(default=None, alias="X-Admin-Password"),
+):
+    _require_admin(settings.admin_password, x_admin_password)
+
+    with APP_STATE.lock:
+        if APP_STATE.training.running:
+            raise HTTPException(status_code=409, detail="Training already running")
+        APP_STATE.training.running = True
+        APP_STATE.training.last_started_utc = _utcnow_iso()
+        APP_STATE.training.last_error = None
+        APP_STATE.training.last_summary = None
+
+    # Build training universe from current universe / last scan
+    with APP_STATE.lock:
+        rows = list(APP_STATE.last_scan_rows)
+        products = list(APP_STATE.universe)
+
+    # Prefer last_scan notional ordering
+    symbols: List[str] = []
+    if rows:
+        rows = sorted(rows, key=lambda r: float(r.get("notional_6h") or 0.0), reverse=True)
+        for r in rows:
+            sym = r.get("symbol")
+            if sym:
+                symbols.append(sym)
+    else:
+        for p in products:
+            pid = p.get("id")
+            if pid and "-" in pid:
+                base, quote = pid.split("-", 1)
+                symbols.append(f"{base}/{quote}")
+
+    # unique + cap
+    seen = set()
+    ordered = []
+    for s in symbols:
+        if s in seen:
+            continue
+        seen.add(s)
+        ordered.append(s)
+        if len(ordered) >= settings.train_max_products:
+            break
+
+    async def run_training() -> Dict[str, Any]:
+        return await anyio.to_thread.run_sync(train_all, settings, ordered)
+
+    try:
+        summary = await run_training()
+        with APP_STATE.lock:
+            APP_STATE.training.last_finished_utc = _utcnow_iso()
+            APP_STATE.training.last_summary = summary
+            APP_STATE.training.running = False
+        return {"ok": True, "summary": summary}
+    except Exception as e:
+        with APP_STATE.lock:
+            APP_STATE.training.last_finished_utc = _utcnow_iso()
+            APP_STATE.training.last_error = str(e)
+            APP_STATE.training.running = False
+        log.exception("training failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/storage")
+async def admin_storage(
+    settings: Settings = Depends(get_settings),
+    x_admin_password: Optional[str] = Header(default=None, alias="X-Admin-Password"),
+):
+    _require_admin(settings.admin_password, x_admin_password)
+
+    path = settings.model_dir
+    try:
+        os.makedirs(path, exist_ok=True)
+        st = os.statvfs(path)
+        total = st.f_frsize * st.f_blocks
+        free = st.f_frsize * st.f_bavail
+        used = total - free
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "path": path,
+        "total_bytes": int(total),
+        "used_bytes": int(used),
+        "free_bytes": int(free),
+        "files": sorted(os.listdir(path)) if os.path.exists(path) else [],
+    }

@@ -1,96 +1,75 @@
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import List
-
+from typing import List, Optional
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """App configuration.
+    model_config = SettingsConfigDict(env_file=None, extra="ignore")
 
-    Notes
-    -----
-    * We intentionally avoid defining `target_move_pct` because this app is
-      multi-threshold (2%, 5%, 10%). Previous iterations introduced it as a
-      `@property`, which Pydantic tried to validate as a field and caused startup
-      failures.
-    """
-
-    # Coinbase
-    coinbase_base_url: str = Field(
-        default="https://api.exchange.coinbase.com", alias="COINBASE_BASE_URL"
-    )
-    coinbase_api_key: str | None = Field(default=None, alias="COINBASE_API_KEY")
-    coinbase_api_secret: str | None = Field(default=None, alias="COINBASE_API_SECRET")
-    coinbase_passphrase: str | None = Field(default=None, alias="COINBASE_PASSPHRASE")
-
-    # Alpaca Crypto Data (Algo Trader Plus)
-    alpaca_api_key: str | None = Field(default=None, alias="ALPACA_API_KEY")
-    alpaca_api_secret: str | None = Field(default=None, alias="ALPACA_API_SECRET")
-    alpaca_data_base_url: str = Field(default="https://data.alpaca.markets", alias="ALPACA_DATA_BASE_URL")
-    alpaca_crypto_location: str = Field(default="us", alias="ALPACA_CRYPTO_LOCATION")
-    alpaca_timeout_seconds: float = Field(default=10.0, alias="ALPACA_TIMEOUT_SECONDS")
-    alpaca_max_concurrency: int = Field(default=4, alias="ALPACA_MAX_CONCURRENCY")
-
-    # Universe filter (Coinbase products are used for tradeability, Alpaca used for bars)
-    quote_currency: str = Field(default="USD", alias="QUOTE_CURRENCY")
-
-
-    # Scanner
-    horizon_hours: int = Field(default=5, alias="HORIZON_HOURS")
-    target_move_pcts: str = Field(default="2,5,10", alias="TARGET_MOVE_PCTS")
-    scan_interval_minutes: int = Field(default=5, alias="SCAN_INTERVAL_MINUTES")
-    scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
+    # Required (no defaults)
+    alpaca_api_key: str = Field(default="", alias="ALPACA_API_KEY")
+    alpaca_api_secret: str = Field(default="", alias="ALPACA_API_SECRET")
     admin_password: str = Field(default="", alias="ADMIN_PASSWORD")
 
-    # MAX_PRODUCTS=0 means no cap; liquidity gates and Alpaca batching keep this scalable.
-    max_products: int = Field(default=0, alias="MAX_PRODUCTS")
+    # Core
+    alpaca_crypto_location: str = Field(default="us", alias="ALPACA_CRYPTO_LOCATION")
+    coinbase_base_url: str = Field(default="https://api.exchange.coinbase.com", alias="COINBASE_BASE_URL")
+    target_move_pcts: str = Field(default="2,5,10", alias="TARGET_MOVE_PCTS")
+    horizon_hours: int = Field(default=5, alias="HORIZON_HOURS")
+    scan_interval_minutes: int = Field(default=5, alias="SCAN_INTERVAL_MINUTES")
+    quote_currency: str = Field(default="USD", alias="QUOTE_CURRENCY")
 
-    # Rate limiting / concurrency
-    # Coinbase Exchange API is strict. Keep this conservative to avoid 429s.
-    coinbase_timeout_seconds: float = Field(default=10.0, alias="COINBASE_TIMEOUT_SECONDS")
-    coinbase_backoff_base_seconds: float = Field(default=0.5, alias="COINBASE_BACKOFF_BASE_SECONDS")
+    # Performance
+    alpaca_max_symbols_per_request: int = Field(default=200, alias="ALPACA_MAX_SYMBOLS_PER_REQUEST")
+    alpaca_max_concurrency: int = Field(default=4, alias="ALPACA_MAX_CONCURRENCY")
+    alpaca_timeout_seconds: int = Field(default=10, alias="ALPACA_TIMEOUT_SECONDS")
+
+    coinbase_timeout_seconds: int = Field(default=10, alias="COINBASE_TIMEOUT_SECONDS")
     coinbase_max_concurrency: int = Field(default=2, alias="COINBASE_MAX_CONCURRENCY")
-    coinbase_requests_per_second: float = Field(default=3.0, alias="COINBASE_RPS")
-    coinbase_max_retries: int = Field(default=5, alias="COINBASE_MAX_RETRIES")
+    coinbase_backoff_base_seconds: float = Field(default=0.5, alias="COINBASE_BACKOFF_BASE_SECONDS")
 
-    # Liquidity gates (not a cap)
-    min_notional_volume: float = Field(default=50000.0, alias="MIN_NOTIONAL_VOLUME_6H")
-    min_bars_5m: int = Field(default=80, alias="MIN_BARS_5M")
-    alpaca_batch_symbols: int = Field(default=200, alias="ALPACA_MAX_SYMBOLS_PER_REQUEST")
+    # Reliability gates
+    min_notional_volume_6h: float = Field(default=50000.0, alias="MIN_NOTIONAL_VOLUME_6H")
 
-    # Storage
-    model_dir: str = Field(default="/var/data/models", alias="MODEL_DIR")
-    artifacts_dir: str = Field(default="models", alias="ARTIFACTS_DIR")
-    train_max_products: int = Field(default=50, alias="TRAIN_MAX_PRODUCTS")
-    train_scan_step_minutes: int = Field(default=15, alias="TRAIN_SCAN_STEP_MINUTES")
+    # Training
+    model_dir: str = Field(default="./models", alias="MODEL_DIR")
     train_lookback_days: int = Field(default=30, alias="TRAIN_LOOKBACK_DAYS")
+    train_scan_step_minutes: int = Field(default=15, alias="TRAIN_SCAN_STEP_MINUTES")
+    train_max_products: int = Field(default=200, alias="TRAIN_MAX_PRODUCTS")
 
-    # Pydantic v2 configuration.
-    # * `protected_namespaces` removes the default protection of `model_` which
-    #   would otherwise warn on our `model_dir` field.
-    # * `env_file` allows local `.env` development; Render uses env vars.
-    model_config = {
-        "protected_namespaces": ("settings_",),
-        "env_file": ".env",
-        "extra": "ignore",
-    }
+    # Optional / quality
+    demo_mode: bool = Field(default=False, alias="DEMO_MODE")
+    quote_max_age_seconds: int = Field(default=15, alias="QUOTE_MAX_AGE_SECONDS")
 
-    def thresholds(self) -> List[float]:
-        out: List[float] = []
-        for part in (self.target_move_pcts or "").split(","):
-            part = part.strip()
-            if not part:
+    # Feature windows
+    feature_lookback_hours: int = Field(default=6, alias="FEATURE_LOOKBACK_HOURS")
+
+    # Sanity controls
+    universe_expected_touch_frac_cap: float = Field(default=0.30, alias="UNIVERSE_EXPECTED_TOUCH_FRAC_CAP")
+    universe_temperature_max: float = Field(default=4.0, alias="UNIVERSE_TEMPERATURE_MAX")
+
+    # Logging
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    def target_pcts(self) -> List[int]:
+        out: List[int] = []
+        for p in self.target_move_pcts.split(","):
+            p = p.strip()
+            if not p:
                 continue
             try:
-                out.append(float(part))
-            except Exception:
+                out.append(int(float(p)))
+            except ValueError:
                 continue
-        return out or [2.0, 5.0, 10.0]
+        out = sorted(set(out))
+        return out if out else [2, 5, 10]
+
+    def horizon_steps(self) -> int:
+        # 5m steps
+        return int((self.horizon_hours * 60) // 5)
 
 
-@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
