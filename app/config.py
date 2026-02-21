@@ -41,12 +41,17 @@ class Settings(BaseSettings):
     # Scanner
     horizon_hours: int = Field(default=5, alias="HORIZON_HOURS")
     target_move_pcts: str = Field(default="2,5,10", alias="TARGET_MOVE_PCTS")
+    scan_interval_minutes: int = Field(default=5, alias="SCAN_INTERVAL_MINUTES")
+    scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
+    admin_password: str = Field(default="", alias="ADMIN_PASSWORD")
 
     # MAX_PRODUCTS=0 means no cap; liquidity gates and Alpaca batching keep this scalable.
     max_products: int = Field(default=0, alias="MAX_PRODUCTS")
 
     # Rate limiting / concurrency
     # Coinbase Exchange API is strict. Keep this conservative to avoid 429s.
+    coinbase_timeout_seconds: float = Field(default=10.0, alias="COINBASE_TIMEOUT_SECONDS")
+    coinbase_backoff_base_seconds: float = Field(default=0.5, alias="COINBASE_BACKOFF_BASE_SECONDS")
     coinbase_max_concurrency: int = Field(default=2, alias="COINBASE_MAX_CONCURRENCY")
     coinbase_requests_per_second: float = Field(default=3.0, alias="COINBASE_RPS")
     coinbase_max_retries: int = Field(default=5, alias="COINBASE_MAX_RETRIES")

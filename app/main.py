@@ -129,7 +129,7 @@ async def startup():
     )
     CB = CoinbaseClient(
         SETTINGS.coinbase_base_url,
-        timeout_seconds=SETTINGS.coinbase_timeout_seconds,
+        timeout_seconds=float(getattr(SETTINGS,'coinbase_timeout_seconds',10.0)),
         max_concurrency=SETTINGS.coinbase_max_concurrency,
         max_retries=SETTINGS.coinbase_max_retries,
         backoff_base_seconds=SETTINGS.coinbase_backoff_base_seconds,
