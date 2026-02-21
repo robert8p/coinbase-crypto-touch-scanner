@@ -17,6 +17,28 @@ from app.utils.features_fast import compute_features_5m_fast
 from app.utils.modeling import load_models, score_symbol, temperature_soften_probs
 
 
+def _clean_float(x):
+    """Return a JSON-safe float (None if NaN/inf/invalid)."""
+    try:
+        xf = float(x)
+    except Exception:
+        return None
+    if xf != xf or xf == float("inf") or xf == float("-inf"):
+        return None
+    return float(xf)
+
+
+def _clean_prob(x):
+    """Return probability in [0,1] and JSON-safe."""
+    v = _clean_float(x)
+    if v is None:
+        return 0.0
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
+
 log = logging.getLogger("scanner")
 
 
@@ -391,18 +413,18 @@ async def scan_once(settings: Settings) -> None:
         row = {
             "symbol": sym,
             "price": float(p0),
-            "atr_pct": float(feats.get("atr_pct", float("nan"))),
+            "atr_pct": _clean_float(feats.get("atr_pct", float("nan"))),
             "spread_bps": float(spread_bps) if np.isfinite(spread_bps) else None,
             "quote_age_s": float(quote_age) if quote_age is not None else None,
-            "notional_6h": float(notional_6h) if np.isfinite(notional_6h) else None,
+            "notional_6h": _clean_float(notional_6h),
             "updated_utc": now.isoformat(),
         }
 
         for pct in target_pcts:
-            row[f"p_touch_{pct}"] = float(probs.get(pct, 0.0))
+            row[f"p_touch_{pct}"] = _clean_prob(probs.get(pct, 0.0))
         # Convenience fields
         if 2 in target_pcts:
-            row["dist_to_target_atr_2"] = float(feats.get("dist_to_target_atr_2", float("nan")))
+            row["dist_to_target_atr_2"] = _clean_float(feats.get("dist_to_target_atr_2", float("nan")))
 
         # Always keep a candidate (in case the liquidity gate excludes everything)
         rows_out_nogate.append(row)
