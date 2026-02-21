@@ -130,7 +130,7 @@ class AlpacaClient:
             batches.append(symbols[i : i + max_symbols_per_request])
 
         out: Dict[str, List[Dict[str, Any]]] = {}
-        async with httpx.AsyncClient(http2=True) as client:
+        async with httpx.AsyncClient(http2=False) as client:
             async def run_batch(batch: List[str]) -> None:
                 async with self.sem:
                     data = await self.fetch_bars(client, batch, timeframe, start, end)
@@ -151,7 +151,7 @@ class AlpacaClient:
             batches.append(symbols[i : i + max_symbols_per_request])
 
         out: Dict[str, Dict[str, Any]] = {}
-        async with httpx.AsyncClient(http2=True) as client:
+        async with httpx.AsyncClient(http2=False) as client:
             async def run_batch(batch: List[str]) -> None:
                 async with self.sem:
                     data = await self.fetch_latest_quotes(client, batch)

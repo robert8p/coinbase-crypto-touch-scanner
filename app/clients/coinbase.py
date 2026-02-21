@@ -20,7 +20,7 @@ async def fetch_products(
     url = base_url.rstrip("/") + "/products"
     headers = {"User-Agent": "coinbase-crypto-touch-scanner/1.0"}
 
-    async with httpx.AsyncClient(http2=True) as client:
+    async with httpx.AsyncClient(http2=False) as client:
         data = await request_json_with_backoff(
             client,
             "GET",
