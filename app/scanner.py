@@ -171,7 +171,7 @@ async def scan_once(settings: Settings) -> None:
         )
 
         # Record any Alpaca symbol rejections / partial batch failures
-        if getattr(alpaca, \"bad_symbols_last\", None):
+        if getattr(alpaca, "bad_symbols_last", None):
             with APP_STATE.lock:
                 for s in alpaca.bad_symbols_last:
                     APP_STATE.alpaca_bad_symbols[s] = now.isoformat()
@@ -180,13 +180,13 @@ async def scan_once(settings: Settings) -> None:
                         APP_STATE.alpaca_bad_symbols.pop(k, None)
 
         # If we got partial errors but some data, surface as a non-fatal warning
-        if getattr(alpaca, \"batch_errors_last\", None) and bars5_new:
-            warn = f\"Alpaca batch partial failures: {len(alpaca.batch_errors_last)} (continuing).\"
+        if getattr(alpaca, "batch_errors_last", None) and bars5_new:
+            warn = f"Alpaca batch partial failures: {len(alpaca.batch_errors_last)} (continuing)."
             with APP_STATE.lock:
                 APP_STATE.alpaca.last_error = warn
 
         # Only request 1m bars/quotes for symbols that actually returned 5m bars
-        symbols_data = sorted(set(bars5_new.keys()) | {\"BTC/USD\", \"ETH/USD\"})
+        symbols_data = sorted(set(bars5_new.keys()) | {"BTC/USD", "ETH/USD"})
 
         # Merge 5m cache
         if full_fetch:
