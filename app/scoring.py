@@ -94,7 +94,7 @@ async def load_models(settings: Settings) -> Dict[float, ModelArtifacts]:
     models={}
     for pct in parse_pcts(settings.target_move_pcts):
         d=base/pct_dir(pct)
-        art=load_artifacts(d) or (load_artifacts(base) if abs(pct-settings.target_move_pct)<1e-9 else None)
+        art=load_artifacts(d) or (load_artifacts(base) if abs(pct-float(getattr(settings,'target_move_pct',pct)))<1e-9 else None)
         if art is None:
             art=default_artifacts(FEATURES)
         models[pct]=art

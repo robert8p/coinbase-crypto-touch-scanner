@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     scan_interval_minutes: int = Field(default=5, alias="SCAN_INTERVAL_MINUTES")
     horizon_hours: int = Field(default=5, alias="HORIZON_HOURS")
     target_move_pcts: str = Field(default="2,5,10", alias="TARGET_MOVE_PCTS")
+    target_move_pct: float = Field(default=2.0, alias="TARGET_MOVE_PCT")
+    target_move_pct_override: float | None = Field(default=None, alias="TARGET_MOVE_PCT")
     max_products: int = Field(default=200, alias="MAX_PRODUCTS")
     quote_currency: str = Field(default="USD", alias="QUOTE_CURRENCY")
 
@@ -34,6 +36,28 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
     coinbase_timeout_seconds: float = Field(default=10.0, alias="COINBASE_TIMEOUT_SECONDS")
     coinbase_max_concurrency: int = Field(default=8, alias="COINBASE_MAX_CONCURRENCY")
+
+    @property
+    def target_move_pct(self) -> float:
+        # Primary threshold used for 'prob' column / backward-compatible logic.
+        if self.target_move_pct_override is not None:
+            try:
+                return float(self.target_move_pct_override)
+            except Exception:
+                pass
+        parts = []
+        for part in str(self.target_move_pcts or '').split(','):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                parts.append(float(part))
+            except Exception:
+                continue
+        if parts:
+            return sorted(set(parts))[0]
+        return 2.0
+
 
 def get_settings() -> Settings:
     return Settings()
