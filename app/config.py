@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=None, extra="ignore")
+    model_config = SettingsConfigDict(env_file=None, extra="ignore", protected_namespaces=("settings_",))
 
     # Required (no defaults)
     alpaca_api_key: str = Field(default="", alias="ALPACA_API_KEY")
@@ -15,7 +15,9 @@ class Settings(BaseSettings):
 
     # Core
     alpaca_crypto_location: str = Field(default="us", alias="ALPACA_CRYPTO_LOCATION")
-    coinbase_base_url: str = Field(default="https://api.exchange.coinbase.com", alias="COINBASE_BASE_URL")
+    alpaca_trading_base_url: str = Field(default="https://api.alpaca.markets", alias="ALPACA_TRADING_BASE_URL")
+    alpaca_trading_timeout_seconds: int = Field(default=10, alias="ALPACA_TRADING_TIMEOUT_SECONDS")
+    alpaca_trading_backoff_base_seconds: float = Field(default=0.5, alias="ALPACA_TRADING_BACKOFF_BASE_SECONDS")
     target_move_pcts: str = Field(default="2,5,10", alias="TARGET_MOVE_PCTS")
     horizon_hours: int = Field(default=5, alias="HORIZON_HOURS")
     scan_interval_minutes: int = Field(default=5, alias="SCAN_INTERVAL_MINUTES")
@@ -26,9 +28,6 @@ class Settings(BaseSettings):
     alpaca_max_concurrency: int = Field(default=4, alias="ALPACA_MAX_CONCURRENCY")
     alpaca_timeout_seconds: int = Field(default=10, alias="ALPACA_TIMEOUT_SECONDS")
 
-    coinbase_timeout_seconds: int = Field(default=10, alias="COINBASE_TIMEOUT_SECONDS")
-    coinbase_max_concurrency: int = Field(default=2, alias="COINBASE_MAX_CONCURRENCY")
-    coinbase_backoff_base_seconds: float = Field(default=0.5, alias="COINBASE_BACKOFF_BASE_SECONDS")
 
     # Reliability gates
     min_notional_volume_6h: float = Field(default=50000.0, alias="MIN_NOTIONAL_VOLUME_6H")

@@ -47,7 +47,20 @@ async def request_json_with_backoff(
 
             resp.raise_for_status()
             return resp.json()
-        except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError, ValueError) as e:
+        except httpx.HTTPStatusError as e:
+            # Don't retry on non-429 4xx (e.g. invalid symbols / oversized URL)
+            try:
+                status = int(getattr(e.response, 'status_code', 0) or 0)
+            except Exception:
+                status = 0
+            if status and status < 500 and status != 429:
+                raise
+            last_exc = e
+            delay = min(backoff_cap, backoff_base * (2**i))
+            delay = delay * (0.8 + 0.4 * random.random())
+            await asyncio.sleep(delay)
+
+        except (httpx.TimeoutException, httpx.TransportError, ValueError) as e:
             last_exc = e
             delay = min(backoff_cap, backoff_base * (2**i))
             delay = delay * (0.8 + 0.4 * random.random())

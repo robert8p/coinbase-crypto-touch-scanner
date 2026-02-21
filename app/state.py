@@ -49,18 +49,17 @@ class AppState:
     # Cached bars (to reduce API load)
     bars5_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     bars5_cache_last_utc: Optional[str] = None
-
     # Diagnostics
-    coinbase: ApiDiag = field(default_factory=ApiDiag)
     alpaca: ApiDiag = field(default_factory=ApiDiag)
+    alpaca_trading: ApiDiag = field(default_factory=ApiDiag)
     training: TrainingDiag = field(default_factory=TrainingDiag)
 
     # Model
     model_loaded: Dict[str, Any] = field(default_factory=dict)
 
-    def set_coinbase_request(self):
-        self.coinbase.last_request_utc = utcnow().isoformat()
-        self.coinbase.rate_limit_warn = None
+    def set_alpaca_trading_request(self):
+        self.alpaca_trading.last_request_utc = utcnow().isoformat()
+        self.alpaca_trading.rate_limit_warn = None
 
     def set_alpaca_request(self):
         self.alpaca.last_request_utc = utcnow().isoformat()

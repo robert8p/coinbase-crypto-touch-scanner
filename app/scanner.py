@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from app.clients.alpaca import AlpacaClient
-from app.clients.coinbase import fetch_products
+from app.clients.alpaca_trading import fetch_crypto_assets
 from app.config import Settings
 from app.state import APP_STATE
 from app.utils.features_fast import compute_features_5m_fast
@@ -23,13 +23,6 @@ log = logging.getLogger("scanner")
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-
-def _alpaca_symbol_from_coinbase(product_id: str) -> Optional[str]:
-    # Coinbase Exchange product id is typically BASE-QUOTE (e.g. BTC-USD)
-    if not product_id or "-" not in product_id:
-        return None
-    base, quote = product_id.split("-", 1)
-    return f"{base}/{quote}"
 
 
 def _parse_quote(q: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[datetime]]:
@@ -61,24 +54,48 @@ def _parse_quote(q: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], O
 
 
 async def refresh_universe(settings: Settings) -> None:
+    """Refresh universe from Alpaca Trading API /v2/assets (asset_class=crypto, tradable=true).
+
+    Filters to pairs with QUOTE_CURRENCY (default USD) and requires `tradable` flag.
+    """
     try:
-        APP_STATE.set_coinbase_request()
-        products = await fetch_products(
-            base_url=settings.coinbase_base_url,
-            quote_currency=settings.quote_currency,
-            timeout_s=settings.coinbase_timeout_seconds,
-            backoff_base_s=settings.coinbase_backoff_base_seconds,
+        APP_STATE.set_alpaca_trading_request()
+        assets = await fetch_crypto_assets(
+            base_url=settings.alpaca_trading_base_url,
+            api_key=settings.alpaca_api_key,
+            api_secret=settings.alpaca_api_secret,
+            status="active",
+            timeout_s=settings.alpaca_trading_timeout_seconds,
+            backoff_base_s=settings.alpaca_trading_backoff_base_seconds,
         )
+
+        quote = (settings.quote_currency or "USD").upper()
+        products = []
+        for a in assets:
+            if not isinstance(a, dict):
+                continue
+            if str(a.get("class") or a.get("asset_class") or "").lower() != "crypto":
+                continue
+            if not bool(a.get("tradable", False)):
+                continue
+            sym = str(a.get("symbol") or "")
+            if "/" not in sym:
+                continue
+            base, q = sym.split("/", 1)
+            if q.upper() != quote:
+                continue
+            products.append({"id": sym, "symbol": sym, "base": base, "quote": q, "raw": a})
+
         with APP_STATE.lock:
             APP_STATE.universe = products
             APP_STATE.universe_last_refresh_utc = _utcnow().isoformat()
-            APP_STATE.coinbase.last_error = None
+            APP_STATE.alpaca_trading.last_error = None
     except Exception as e:
         s = str(e)
         with APP_STATE.lock:
-            APP_STATE.coinbase.last_error = s
-            if '429' in s:
-                APP_STATE.coinbase.rate_limit_warn = s
+            APP_STATE.alpaca_trading.last_error = s
+            if "429" in s:
+                APP_STATE.alpaca_trading.rate_limit_warn = s
         log.exception("Universe refresh failed")
 
 
@@ -115,9 +132,10 @@ async def scan_once(settings: Settings) -> None:
     # Build alpaca symbols list
     symbols = []
     for p in products:
-        sym = _alpaca_symbol_from_coinbase(p.get("id"))
+        sym = p.get("symbol") or p.get("id")
         if sym:
-            symbols.append(sym)
+            symbols.append(str(sym))
+
 
     # Safety: always include BTC and ETH for regime
     for s in ["BTC/USD", "ETH/USD"]:
@@ -173,6 +191,16 @@ async def scan_once(settings: Settings) -> None:
             symbols,
             max_symbols_per_request=max(50, settings.alpaca_max_symbols_per_request // 2),
         )
+
+        # Record any Alpaca symbol rejections discovered during quotes fetch
+        if getattr(alpaca, "bad_symbols_last", None):
+            with APP_STATE.lock:
+                for s in alpaca.bad_symbols_last:
+                    APP_STATE.alpaca_bad_symbols[s] = now.isoformat()
+                if len(APP_STATE.alpaca_bad_symbols) > 2000:
+                    for k in list(APP_STATE.alpaca_bad_symbols.keys())[:200]:
+                        APP_STATE.alpaca_bad_symbols.pop(k, None)
+
 
         symbols_supported = sorted(set(quotes.keys()) | {"BTC/USD", "ETH/USD"})
         missing = [s for s in symbols if s not in symbols_supported and s not in {"BTC/USD", "ETH/USD"}]

@@ -1,10 +1,10 @@
-# Coinbase Tradeable Crypto Touch Probability Scanner
+# Alpaca Tradeable Crypto Touch Probability Scanner
 
-Production-ready FastAPI web app that scans **Coinbase-tradeable** crypto pairs (via Coinbase Exchange `/products`) and uses **Alpaca Crypto Data API** for bars/quotes to estimate the probability that price will **touch +2%, +5%, +10% within the next 5 hours**.
+Production-ready FastAPI web app that scans **Alpaca-tradeable** crypto pairs (via Alpaca Exchange `/products`) and uses **Alpaca Crypto Data API** for bars/quotes to estimate the probability that price will **touch +2%, +5%, +10% within the next 5 hours**.
 
 ## Key points
-- Coinbase API is used **only** for the tradable universe.
-- No Coinbase candle calls.
+- Alpaca API is used **only** for the tradable universe.
+- No Alpaca candle calls.
 - Alpaca bars/quotes are **batched** and concurrency-limited.
 - Hazard-style aggregation over 5-minute steps: `P = 1 - (1-h)^60`.
 - Calibration + monotonicity across thresholds.
@@ -18,7 +18,7 @@ export ADMIN_PASSWORD=change-me
 
 # optional
 export ALPACA_CRYPTO_LOCATION=us
-export COINBASE_BASE_URL=https://api.exchange.coinbase.com
+export ALPACA_TRADING_BASE_URL=https://api.exchange.coinbase.com
 export TARGET_MOVE_PCTS=2,5,10
 export HORIZON_HOURS=5
 export SCAN_INTERVAL_MINUTES=5

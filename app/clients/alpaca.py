@@ -42,7 +42,7 @@ class AlpacaClient:
         return {
             "APCA-API-KEY-ID": self.key,
             "APCA-API-SECRET-KEY": self.secret,
-            "User-Agent": "coinbase-crypto-touch-scanner/1.0",
+            "User-Agent": "alpaca-crypto-touch-scanner/1.0",
         }
 
     def _make_url_bounded_batches(
@@ -267,7 +267,7 @@ class AlpacaClient:
             base_params=base_params,
             symbols=symbols,
             max_symbols_per_request=max_symbols_per_request,
-            url_len_cap=7000,
+            url_len_cap=3500,
         )
 
         out: Dict[str, Dict[str, Any]] = {}

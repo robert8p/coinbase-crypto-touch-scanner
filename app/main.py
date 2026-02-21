@@ -26,7 +26,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-app = FastAPI(title="Crypto Touch Probability Scanner", version="1.0.0")
+app = FastAPI(title="Alpaca Crypto Touch Probability Scanner", version="1.0.0")
 
 # Ensure dirs exist (avoid startup crashes if missing)
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -129,9 +129,8 @@ async def api_status(settings: Settings = Depends(get_settings)):
         uni_count = len(APP_STATE.universe)
         scored_count = len(APP_STATE.last_scan_rows)
         state = {
-            "demo_mode": settings.demo_mode,
-            "coinbase": APP_STATE.coinbase.__dict__,
-            "alpaca": APP_STATE.alpaca.__dict__,
+            "demo_mode": settings.demo_mode,            "alpaca": APP_STATE.alpaca.__dict__,
+            "alpaca_trading": APP_STATE.alpaca_trading.__dict__,
             "alpaca_bad_symbols_count": len(APP_STATE.alpaca_bad_symbols),
             "alpaca_bad_symbols_sample": list(APP_STATE.alpaca_bad_symbols.keys())[:10],
             "alpaca_supported_symbols_count": APP_STATE.alpaca_supported_symbols_count,
@@ -150,9 +149,7 @@ async def api_status(settings: Settings = Depends(get_settings)):
         "horizon_hours": settings.horizon_hours,
         "scan_interval_minutes": settings.scan_interval_minutes,
         "min_notional_volume_6h": settings.min_notional_volume_6h,
-        "alpaca_crypto_location": settings.alpaca_crypto_location,
-        "coinbase_base_url": settings.coinbase_base_url,
-    }
+        "alpaca_crypto_location": settings.alpaca_crypto_location,    }
 
     return state
 
