@@ -123,6 +123,13 @@ async def scan_once(settings: Settings) -> None:
     with APP_STATE.lock:
         products = list(APP_STATE.universe)
 
+    if not products:
+        with APP_STATE.lock:
+            APP_STATE.last_scan_error = (
+                "Universe is empty. Alpaca Trading API /v2/assets likely failed (check ALPACA_API_KEY/SECRET and ALPACA_TRADING_BASE_URL: paper vs live)."
+            )
+        return
+
     with APP_STATE.lock:
         bad_syms = set(APP_STATE.alpaca_bad_symbols.keys())
 
@@ -210,7 +217,7 @@ async def scan_once(settings: Settings) -> None:
             APP_STATE.alpaca_missing_symbols_count = len(missing)
 
         if len(symbols_supported) <= 2:
-            raise RuntimeError("Alpaca returned quotes for 0 symbols (check Alpaca key/plan/crypto location).")
+            raise RuntimeError("Alpaca quotes returned no supported symbols beyond BTC/USD & ETH/USD. Check universe source and Alpaca crypto location.")
 
         # Step 2: fetch 5m bars only for supported symbols (reduces 400s / invalid symbol issues).
         bars5_new = await alpaca.fetch_bars_batched(
@@ -220,6 +227,37 @@ async def scan_once(settings: Settings) -> None:
             end=end_5m,
             max_symbols_per_request=settings.alpaca_max_symbols_per_request,
         )
+
+        # Merge 5m cache
+        if full_fetch:
+            merged: Dict[str, List[Dict[str, Any]]] = {}
+            for sym in symbols_supported:
+                rows = sorted(bars5_new.get(sym, []), key=lambda b: b.get("t", ""))
+                merged[sym] = rows
+        else:
+            merged = cache
+            for sym, rows_new in bars5_new.items():
+                existing = merged.get(sym, [])
+                comb = existing + rows_new
+                seen_t = set()
+                out_rows = []
+                for b in sorted(comb, key=lambda b: b.get("t", "")):
+                    tt = b.get("t")
+                    if not tt or tt in seen_t:
+                        continue
+                    seen_t.add(tt)
+                    out_rows.append(b)
+                keep_n = int((settings.feature_lookback_hours * 60) // 5) + 10
+                if len(out_rows) > keep_n:
+                    out_rows = out_rows[-keep_n:]
+                merged[sym] = out_rows
+
+        with APP_STATE.lock:
+            APP_STATE.bars5_cache = merged
+            APP_STATE.bars5_cache_last_utc = now.isoformat()
+
+        bars5 = merged
+
 
         # Record any Alpaca symbol rejections / partial batch failures (if we did hit 400s internally)
         if getattr(alpaca, "bad_symbols_last", None):
@@ -237,7 +275,7 @@ async def scan_once(settings: Settings) -> None:
                 APP_STATE.alpaca.last_error = warn
 
         # Only request 1m bars for symbols that actually returned 5m bars
-        symbols_data = sorted(set(bars5_new.keys()) | {"BTC/USD", "ETH/USD"})
+        symbols_data = sorted(set(bars5.keys()) | {"BTC/USD", "ETH/USD"})
 
         # Fetch last 3 minutes of 1m bars for fallback close
         bars1 = await alpaca.fetch_bars_batched(
