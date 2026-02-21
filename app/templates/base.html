@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <title>Coinbase Crypto Touch Scanner</title>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-7xl mx-auto p-4">
+    <div class="flex items-center justify-between mb-4">
+      <a href="/" class="text-xl font-semibold">Coinbase Crypto Touch Scanner</a>
+      <div class="flex gap-3 text-sm">
+        <a href="/train" class="underline">Train</a>
+        <a href="/api/status" class="underline">Status</a>
+      </div>
+    </div>
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

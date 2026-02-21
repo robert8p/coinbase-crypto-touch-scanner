@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: coinbase-crypto-touch-scanner
+    env: docker
+    plan: standard
+    healthCheckPath: /health
+    envVars:
+      - key: TIMEZONE
+        value: UTC
+      - key: SCAN_INTERVAL_MINUTES
+        value: "5"
+      - key: HORIZON_HOURS
+        value: "5"
+      - key: TARGET_MOVE_PCTS
+        value: "2,5,10"
+      - key: MAX_PRODUCTS
+        value: "200"

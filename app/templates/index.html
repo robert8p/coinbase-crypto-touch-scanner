@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+  <div class="lg:col-span-3">
+    <div class="bg-white rounded-xl shadow p-3 mb-3">
+      <div class="flex flex-wrap gap-2 items-center">
+        <label class="text-sm">Min P(+2%):</label>
+        <input id="minProb" type="number" step="0.01" value="0" class="border rounded px-2 py-1 w-24"/>
+        <button id="refreshBtn" class="bg-slate-900 text-white px-3 py-1 rounded">Refresh</button>
+        <div id="err" class="text-sm text-rose-700"></div>
+      </div>
+    </div>
+    <div class="bg-white rounded-xl shadow overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead class="bg-slate-100">
+          <tr>
+            <th class="text-left px-3 py-2">Product</th>
+            <th class="text-right px-3 py-2">P(+2% in 5h)</th>
+            <th class="text-right px-3 py-2">P(+5% in 5h)</th>
+            <th class="text-right px-3 py-2">P(+10% in 5h)</th>
+            <th class="text-right px-3 py-2">Price</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+  <div>
+    <div class="bg-white rounded-xl shadow p-3">
+      <div class="font-semibold mb-2">System status</div>
+      <pre id="status" class="text-xs whitespace-pre-wrap"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+async function loadStatus(){
+  const r = await fetch('/api/status');
+  const j = await r.json();
+  document.getElementById('status').textContent = JSON.stringify(j,null,2);
+}
+function rowHtml(r){
+  return `<tr class="border-t hover:bg-slate-50">
+    <td class="px-3 py-2 font-mono"><a class="underline" href="/symbol/${encodeURIComponent(r.product_id)}">${r.product_id}</a></td>
+    <td class="px-3 py-2 text-right font-semibold">${(r.prob_2*100).toFixed(2)}%</td>
+    <td class="px-3 py-2 text-right">${(r.prob_5*100).toFixed(2)}%</td>
+    <td class="px-3 py-2 text-right">${(r.prob_10*100).toFixed(2)}%</td>
+    <td class="px-3 py-2 text-right">${Number(r.price).toFixed(4)}</td>
+  </tr>`;
+}
+async function loadScores(){
+  const minProb = Number(document.getElementById('minProb').value||0);
+  const r = await fetch(`/api/scores?min_prob=${encodeURIComponent(minProb)}&limit=200`);
+  const j = await r.json();
+  document.getElementById('err').textContent = j.last_error? j.last_error : '';
+  const rows = j.rows||[];
+  document.getElementById('rows').innerHTML = rows.map(rowHtml).join('');
+}
+document.getElementById('refreshBtn').addEventListener('click', async ()=>{await loadScores(); await loadStatus();});
+loadScores(); loadStatus();
+setInterval(loadScores, 300000);
+setInterval(loadStatus, 60000);
+</script>
+{% endblock %}

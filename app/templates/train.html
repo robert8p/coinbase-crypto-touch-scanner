@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="max-w-xl mx-auto bg-white rounded-xl shadow p-4">
+  <h2 class="text-xl font-semibold mb-2">Train</h2>
+  <div class="text-sm text-slate-600 mb-3">
+    This build includes live scanning and a training job. A full historical training pipeline can be added if you want stricter calibration.
+  </div>
+  {% if error %}
+    <div class="p-3 rounded bg-rose-50 text-rose-700 text-sm mb-3">{{ error }}</div>
+  {% endif %}
+  {% if result %}
+    <div class="p-3 rounded bg-emerald-50 text-emerald-800 text-sm mb-3">{{ result }}</div>
+  {% endif %}
+  <form method="post">
+    <input type="password" name="password" placeholder="Admin password" class="border rounded px-3 py-2 w-full mb-2" required />
+    <button class="bg-slate-900 text-white px-4 py-2 rounded">Start training</button>
+  </form>
+</div>
+{% endblock %}
