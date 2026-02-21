@@ -17,14 +17,24 @@ from .state import AppState, SymbolScore
 logger = setup_logging()
 app = FastAPI(title="Coinbase Crypto Touch Scanner")
 BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+templates = Jinja2Templates(directory=str(templates_path))
 
 STATE = AppState()
 SETTINGS: Optional[Settings] = None
 CB: Optional[CoinbaseClient] = None
 PRODUCTS: List[str] = []
 
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+static_path = BASE_DIR / "static"
+# Ensure directories exist even if repo has no assets/templates (prevents Render startup crashes)
+templates_path = BASE_DIR / "templates"
+templates_path.mkdir(parents=True, exist_ok=True)
+# Ensure directory exists even if repo has no assets
+static_path.mkdir(parents=True, exist_ok=True)
+try:
+    app.mount("/static", StaticFiles(directory=str(static_path), check_dir=False), name="static")
+except Exception as e:
+    # Never hard-fail on static mount (Render requires app import to succeed)
+    print(f"WARN: failed to mount /static: {e}")
 
 def _utcnow():
     return datetime.now(timezone.utc)
