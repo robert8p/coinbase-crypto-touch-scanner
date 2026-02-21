@@ -30,5 +30,10 @@ class Settings(BaseSettings):
     # Demo
     demo_mode: bool = Field(default=False, alias="DEMO_MODE")
 
+    # Runtime
+    scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
+    coinbase_timeout_seconds: float = Field(default=10.0, alias="COINBASE_TIMEOUT_SECONDS")
+    coinbase_max_concurrency: int = Field(default=8, alias="COINBASE_MAX_CONCURRENCY")
+
 def get_settings() -> Settings:
     return Settings()

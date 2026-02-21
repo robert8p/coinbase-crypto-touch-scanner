@@ -17,6 +17,14 @@ from .state import AppState, SymbolScore
 logger = setup_logging()
 app = FastAPI(title="Coinbase Crypto Touch Scanner")
 BASE_DIR = Path(__file__).resolve().parent
+static_path = BASE_DIR / "static"
+templates_path = BASE_DIR / "templates"
+# Ensure directories exist even if repo has no assets/templates (prevents Render startup crashes)
+try:
+    templates_path.mkdir(parents=True, exist_ok=True)
+    static_path.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
 templates = Jinja2Templates(directory=str(templates_path))
 
 STATE = AppState()
@@ -24,12 +32,6 @@ SETTINGS: Optional[Settings] = None
 CB: Optional[CoinbaseClient] = None
 PRODUCTS: List[str] = []
 
-static_path = BASE_DIR / "static"
-# Ensure directories exist even if repo has no assets/templates (prevents Render startup crashes)
-templates_path = BASE_DIR / "templates"
-templates_path.mkdir(parents=True, exist_ok=True)
-# Ensure directory exists even if repo has no assets
-static_path.mkdir(parents=True, exist_ok=True)
 try:
     app.mount("/static", StaticFiles(directory=str(static_path), check_dir=False), name="static")
 except Exception as e:
@@ -56,7 +58,11 @@ async def score_cycle():
     global PRODUCTS
     try:
         if not PRODUCTS:
-            await refresh_products()
+            try:
+                await refresh_products()
+            except Exception as e:
+                logger.warning(f"Product refresh failed: {type(e).__name__}: {e}")
+                # proceed with empty universe; API will return 0 rows + last_error in status.
         df, meta = await compute_scores(SETTINGS, CB, PRODUCTS)
         updated=_utcnow()
         with STATE.lock:
@@ -97,10 +103,15 @@ async def startup():
     global SETTINGS, CB
     SETTINGS = get_settings()
     (Path(SETTINGS.model_dir)).mkdir(parents=True, exist_ok=True)
-    CB = CoinbaseClient(SETTINGS.coinbase_base_url)
-    await refresh_products()
-    asyncio.create_task(scheduler_loop())
-    logger.info("Started scheduler")
+    CB = CoinbaseClient(SETTINGS.coinbase_base_url, timeout_seconds=SETTINGS.coinbase_timeout_seconds, max_concurrency=SETTINGS.coinbase_max_concurrency)
+    # Do not let startup fail if Coinbase is temporarily unreachable
+    try:
+        await refresh_products()
+    except Exception as e:
+        logger.warning(f"Product refresh failed on startup: {type(e).__name__}: {e}")
+    if SETTINGS.scheduler_enabled:
+        asyncio.create_task(scheduler_loop())
+        logger.info("Started scheduler")
 
 @app.on_event("shutdown")
 async def shutdown():
