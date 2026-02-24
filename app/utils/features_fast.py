@@ -133,8 +133,23 @@ def compute_features_5m_fast(
         out["close_pos"] = float((c[-1] - l[-1]) / rng)
     else:
         out["close_pos"] = float("nan")
-
-    # Notional 6h
-    out["notional_6h"] = float(np.nansum(c * v))
-
+    # Notional 6h (robust): sum(volume * vwap_or_close) over last 6h of 5m bars
+    n6 = int((6 * 60) // 5)
+    bars6 = bars[-n6:] if len(bars) > n6 else bars
+    notional = 0.0
+    for b in bars6:
+        try:
+            vol = float(b.get("v", b.get("volume", 0.0)) or 0.0)
+        except Exception:
+            vol = 0.0
+        try:
+            px = float(b.get("vw", b.get("c", np.nan)))
+        except Exception:
+            px = float("nan")
+        if not np.isfinite(vol) or vol <= 0:
+            continue
+        if not np.isfinite(px) or px <= 0:
+            continue
+        notional += vol * px
+    out["notional_6h"] = float(notional)
     return out

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 from datetime import datetime, timezone
@@ -228,6 +229,66 @@ async def admin_train(
             APP_STATE.training.running = False
         log.exception("training failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/train", response_class=HTMLResponse)
+async def browser_train_page(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+):
+    # Browser-friendly page for triggering training without curl/Postman.
+    # If called with ?run=1&password=..., trigger training directly (GET).
+    run_q = str(request.query_params.get("run", "")).lower()
+    if run_q in {"1", "true", "yes"}:
+        qpw = request.query_params.get("password")
+        result = await admin_train(settings=settings, x_admin_password=qpw)
+        return HTMLResponse(
+            content=(
+                "<html><body style='font-family:Arial,sans-serif;padding:16px'>"
+                "<h2>Training started/completed</h2>"
+                "<p><a href='/api/status'>Open /api/status</a> to monitor progress/result.</p>"
+                f"<pre style='white-space:pre-wrap;background:#f5f5f5;padding:12px;border-radius:8px'>{html.escape(str(result))}</pre>"
+                "<p><a href='/train'>Back to /train</a></p>"
+                "</body></html>"
+            )
+        )
+
+    page = """
+    <html>
+      <head><title>Train Models</title></head>
+      <body style="font-family:Arial,sans-serif;padding:16px;max-width:760px;margin:auto">
+        <h2>Train models</h2>
+        <p>This page is a browser-friendly wrapper for <code>POST /admin/train</code>.</p>
+        <form method="post" action="/train" style="margin:16px 0">
+          <label for="password"><b>Admin password</b></label><br/>
+          <input id="password" name="password" type="password" style="width:100%;max-width:420px;padding:8px;margin-top:6px"/><br/><br/>
+          <button type="submit" style="padding:10px 14px">Start training</button>
+        </form>
+        <p>After submitting, monitor <a href="/api/status">/api/status</a>.</p>
+      </body>
+    </html>
+    """
+    return HTMLResponse(content=page)
+
+
+@app.post("/train", response_class=HTMLResponse)
+async def browser_train_submit(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+):
+    form = await request.form()
+    password = form.get("password")
+    result = await admin_train(settings=settings, x_admin_password=password)
+    return HTMLResponse(
+        content=(
+            "<html><body style='font-family:Arial,sans-serif;padding:16px'>"
+            "<h2>Training started/completed</h2>"
+            "<p><a href='/api/status'>Open /api/status</a> to monitor progress/result.</p>"
+            f"<pre style='white-space:pre-wrap;background:#f5f5f5;padding:12px;border-radius:8px'>{html.escape(str(result))}</pre>"
+            "<p><a href='/train'>Back to /train</a></p>"
+            "</body></html>"
+        )
+    )
 
 
 @app.get("/admin/storage")

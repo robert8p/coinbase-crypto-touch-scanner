@@ -436,6 +436,20 @@ async def scan_once(settings: Settings) -> None:
         rows_out.append(row)
         diag["scored"] += 1
 
+
+# Notional distribution diagnostics (based on candidates)
+_notionals = [r.get("notional_6h") for r in rows_out_nogate if r.get("notional_6h") is not None]
+if _notionals:
+    try:
+        arr = np.array(_notionals, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size:
+            diag["notional_6h_min"] = float(np.min(arr))
+            diag["notional_6h_median"] = float(np.median(arr))
+            diag["notional_6h_max"] = float(np.max(arr))
+    except Exception:
+        pass
+
     # If liquidity gate excluded everything, show candidates anyway (flagging it)
     if (not rows_out) and rows_out_nogate:
         rows_out = rows_out_nogate
